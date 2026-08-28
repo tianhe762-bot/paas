@@ -125,3 +125,80 @@ async def test_migrate_old_ai_mode(tmp_path):
     assert data["local_enabled"] is True
     assert data["order"] == "rules,local,cloud"
     conn.close()
+
+
+async def test_migrate_old_ai_mode_with_defaults_present(tmp_path):
+    """升级后 ensure_default_settings 已插入新默认字段，ai_mode 仍应被转换。"""
+    from paas import settings_store
+    from paas.config import settings
+    from paas.db import connect, init_db
+    from paas.modules.admin import service as admin_service
+
+    settings.db_path = tmp_path / "mig2.db"
+    settings.data_dir = tmp_path / "data"
+    settings.secret_key_path = tmp_path / "k2"
+    conn = connect()
+    init_db(conn)
+    settings_store.ensure_default_settings(conn)
+    settings_store.set_setting(conn, "ai_mode", "ollama")
+    # 不删除 ai_local_enabled（真实升级路径：默认值已存在）
+    data = admin_service.get_ai_settings(conn)
+    assert data["local_enabled"] is True
+    assert data["order"] == "rules,local,cloud"
+    rows = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+    assert "ai_mode" not in rows
+    conn.close()
+
+
+async def test_migrate_cloud_copies_old_key(tmp_path):
+    from paas import settings_store
+    from paas.config import settings
+    from paas.db import connect, init_db
+    from paas.modules.admin import service as admin_service
+    from paas.security import encrypt_json
+
+    settings.db_path = tmp_path / "mig3.db"
+    settings.data_dir = tmp_path / "data"
+    settings.secret_key_path = tmp_path / "k3"
+    conn = connect()
+    init_db(conn)
+    settings_store.ensure_default_settings(conn)
+    settings_store.set_setting(conn, "ai_mode", "cloud")
+    settings_store.set_setting(conn, "ai_base_url", "https://api.example.com/v1")
+    settings_store.set_setting(conn, "ai_model", "gpt-4o-mini")
+    enc = encrypt_json({"key": "sk-test-123"})
+    settings_store.set_setting(conn, "ai_api_key", enc)
+    data = admin_service.get_ai_settings(conn)
+    assert data["cloud_enabled"] is True
+    assert data["order"] == "rules,cloud,local"
+    assert data["cloud_base_url"] == "https://api.example.com/v1"
+    assert data["cloud_model"] == "gpt-4o-mini"
+    assert data["has_api_key"] is True
+    stored = settings_store.get_setting(conn, "ai_cloud_api_key", "")
+    from paas.security import decrypt_json
+
+    assert decrypt_json(stored).get("key") == "sk-test-123"
+    rows = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+    assert "ai_mode" not in rows
+    conn.close()
+
+
+async def test_migrate_off_cleans_orphan(tmp_path):
+    from paas import settings_store
+    from paas.config import settings
+    from paas.db import connect, init_db
+    from paas.modules.admin import service as admin_service
+
+    settings.db_path = tmp_path / "mig4.db"
+    settings.data_dir = tmp_path / "data"
+    settings.secret_key_path = tmp_path / "k4"
+    conn = connect()
+    init_db(conn)
+    settings_store.ensure_default_settings(conn)
+    settings_store.set_setting(conn, "ai_mode", "off")
+    data = admin_service.get_ai_settings(conn)
+    assert data["local_enabled"] is False
+    assert data["cloud_enabled"] is False
+    rows = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+    assert "ai_mode" not in rows
+    conn.close()

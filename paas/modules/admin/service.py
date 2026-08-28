@@ -477,18 +477,38 @@ def migrate_ai_settings(conn) -> None:
         r["key"]: r["value"]
         for r in conn.execute("SELECT key, value FROM settings").fetchall()
     }
-    if "ai_mode" in rows and "ai_local_enabled" not in rows:
-        mode = rows.get("ai_mode", "off")
-        if mode == "ollama":
-            updates = {"ai_local_enabled": "1", "ai_order": "rules,local,cloud"}
-        elif mode == "cloud":
-            updates = {"ai_cloud_enabled": "1", "ai_order": "rules,cloud,local"}
-        else:
-            updates = {}
-        for k, v in updates.items():
-            settings_store.set_setting(conn, k, v)
-        conn.execute("DELETE FROM settings WHERE key='ai_mode'")
-        conn.commit()
+    if "ai_mode" not in rows:
+        return
+    mode = rows.get("ai_mode", "off")
+    # 注意：ensure_default_settings 在启动时已插入 ai_local_enabled=0 等新字段，
+    # 所以不能以"新字段不存在"作为迁移条件；只按 ai_mode 是否存在判断。
+    # 若用户升级后已手动配置过（新开关已是 1），保留用户配置，仅补齐缺省值。
+    if mode == "ollama":
+        if settings_store.get_setting(conn, "ai_local_enabled", "0") != "1":
+            settings_store.set_setting(conn, "ai_local_enabled", "1")
+        settings_store.set_setting(conn, "ai_order", "rules,local,cloud")
+        if not (settings_store.get_setting(conn, "ai_local_model", "") or ""):
+            settings_store.set_setting(
+                conn, "ai_local_model", rows.get("ai_model") or "qwen2.5:0.5b"
+            )
+        if not (settings_store.get_setting(conn, "ai_local_base_url", "") or ""):
+            settings_store.set_setting(
+                conn, "ai_local_base_url", rows.get("ai_base_url") or "http://localhost:11434"
+            )
+    elif mode == "cloud":
+        if settings_store.get_setting(conn, "ai_cloud_enabled", "0") != "1":
+            settings_store.set_setting(conn, "ai_cloud_enabled", "1")
+        settings_store.set_setting(conn, "ai_order", "rules,cloud,local")
+        if not (settings_store.get_setting(conn, "ai_cloud_model", "") or ""):
+            settings_store.set_setting(conn, "ai_cloud_model", rows.get("ai_model") or "")
+        if not (settings_store.get_setting(conn, "ai_cloud_base_url", "") or ""):
+            settings_store.set_setting(conn, "ai_cloud_base_url", rows.get("ai_base_url") or "")
+        if not (settings_store.get_setting(conn, "ai_cloud_api_key", "") or ""):
+            old_key = rows.get("ai_api_key") or ""
+            if old_key:
+                settings_store.set_setting(conn, "ai_cloud_api_key", old_key)
+    conn.execute("DELETE FROM settings WHERE key='ai_mode'")
+    conn.commit()
 
 
 def put_ai_settings(conn, updates: dict[str, Any]) -> list[str]:
