@@ -62,8 +62,9 @@ def commands_text() -> dict[str, str]:
 
 
 async def _docker(method: str, path: str, json_body: dict | None = None):
-    transport = httpx.AsyncHTTPTransport(uds=str(SOCKET), timeout=60.0)
-    async with httpx.AsyncClient(transport=transport) as client:
+    # httpx>=0.28 的 timeout 在客户端上设置，transport 不再接受 timeout 参数
+    transport = httpx.AsyncHTTPTransport(uds=str(SOCKET))
+    async with httpx.AsyncClient(transport=transport, timeout=60.0) as client:
         resp = await client.request(method, "http://docker" + path, json=json_body)
         if resp.status_code >= 400:
             raise RuntimeError(f"Docker API {method} {path} -> {resp.status_code} {resp.text[:200]}")
