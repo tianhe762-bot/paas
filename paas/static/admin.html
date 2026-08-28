@@ -221,19 +221,28 @@
           <div class="switch"><input type="checkbox" id="aiLocalEnabled"><span>启用</span></div>
         </div>
         <p class="muted">停用只停止调用、保留模型；「删除本地模型」才会真正移除文件（需重新下载）。</p>
+        <div class="muted" style="border:1px dashed #888;border-radius:8px;padding:8px 10px;margin:8px 0">
+          <strong>首次使用（3 步）：</strong><br>
+          ① 在服务器启动 Ollama 容器：<code>cd /opt/paas && docker compose --profile ai up -d</code><br>
+          ② 点下方「查看状态」，显示“Ollama 在线”后继续<br>
+          ③ 点「拉取模型」，首次约 400MB，请等待提示“已安装完成”
+        </div>
         <div class="row">
-          <div><label>模型（预设或手填 Ollama 模型名）</label>
+          <div><label>模型（默认 qwen2.5:0.5b，一般不用改）</label>
             <input id="aiLocalModel" list="aiLocalModelList" placeholder="qwen2.5:0.5b">
             <datalist id="aiLocalModelList">
               <option value="qwen2.5:0.5b">qwen2.5:0.5b（默认，约 400MB）</option>
               <option value="qwen2.5:1.5b">qwen2.5:1.5b（约 1GB）</option>
             </datalist>
+            <p class="muted" style="margin:4px 0 0">从下拉选一个即可；想用更大模型可手填其他 Ollama 模型名（如 qwen2.5:7b），填什么就拉取什么。</p>
           </div>
-          <div><label>接口地址（PAAS 调用地址，不是下载地址）</label><input id="aiLocalBaseUrl" placeholder="http://localhost:11434"></div>
+          <div><label>接口地址（默认不用改）</label><input id="aiLocalBaseUrl" placeholder="http://localhost:11434">
+            <p class="muted" style="margin:4px 0 0">默认 <code>http://localhost:11434</code> 即可，这是 PAAS 调用 Ollama 的地址（不是下载地址）。只有当 Ollama 装在别的机器或改了端口时才需要改成对应地址，如 <code>http://192.168.x.x:11434</code>。</p>
+          </div>
         </div>
         <div style="margin-top:10px">
           <button class="btn-ghost btn-sm" onclick="aiStatus()">查看状态</button>
-          <button class="btn-ghost btn-sm" onclick="aiPull()">拉取模型</button>
+          <button class="btn-ghost btn-sm" id="aiPullBtn" onclick="aiPull()">拉取模型</button>
           <button class="btn-danger btn-sm" onclick="aiDeleteLocal()">删除本地模型</button>
           <input id="aiDeleteConfirm" style="width:auto;display:inline-block;margin-left:8px" placeholder="输入：删除本地模型">
         </div>
@@ -582,6 +591,17 @@ async function loadAi() {
     document.getElementById("aiTimeout").value = a.timeout_seconds || "45";
     document.getElementById("aiApiKey").value = "";
     document.getElementById("aiApiKey").placeholder = a.has_api_key ? "已保存，留空不改" : "输入 API Key";
+    const statusEl = document.getElementById("aiStatusResult");
+    if (a.local_installed) {
+      if (a.local_installed.ok) {
+        statusEl.textContent = "✅ Ollama 在线，已安装模型：" +
+          (a.local_installed.models && a.local_installed.models.length
+            ? a.local_installed.models.join(", ") : "无（点「拉取模型」安装）");
+      } else if (a.local_enabled) {
+        statusEl.textContent = "❌ Ollama 不可达：" + (a.local_installed.error || "") +
+          "（请先按上方步骤①启动 Ollama 容器）";
+      }
+    }
     aiToggleGrey();
   } catch (e) { /* 忽略 */ }
 }
@@ -614,16 +634,31 @@ async function aiStatus() {
   try {
     const r = await api("/admin/api/ai/status", {method: "POST"});
     document.getElementById("aiStatusResult").textContent = r.ok
-      ? "Ollama 在线，已安装模型：" + (r.models && r.models.length ? r.models.join(", ") : "无")
-      : "Ollama 不可达：" + (r.error || "");
+      ? "✅ Ollama 在线，已安装模型：" + (r.models && r.models.length ? r.models.join(", ") : "无（点「拉取模型」安装）")
+      : "❌ Ollama 不可达：" + (r.error || "") + "（请先按上方步骤①启动 Ollama 容器）";
   } catch (e) { showMsg("msg-ai", "查询失败：" + e.message, false); }
 }
 async function aiPull() {
   try {
     const model = document.getElementById("aiLocalModel").value.trim() || "qwen2.5:0.5b";
+    const btn = document.getElementById("aiPullBtn");
+    const statusEl = document.getElementById("aiStatusResult");
+    btn.disabled = true;
+    btn.textContent = "拉取中…";
+    statusEl.textContent = "⏳ 正在拉取模型 " + model + "（首次约 400MB，可能需要几分钟，请勿关闭页面）…";
     const r = await api("/admin/api/ai/pull", {method: "POST", body: JSON.stringify({model})});
-    document.getElementById("aiStatusResult").textContent = r.message;
+    if (r.ok) {
+      statusEl.textContent = "✅ " + r.message + "（可在聊天里用「用AI：今天微信吃饭花了25」验证）";
+      showMsg("msg-ai", "模型 " + model + " 已安装完成", true);
+      aiStatus();
+    } else {
+      statusEl.textContent = "❌ " + r.message;
+    }
   } catch (e) { showMsg("msg-ai", "拉取失败：" + e.message, false); }
+  finally {
+    const btn = document.getElementById("aiPullBtn");
+    if (btn) { btn.disabled = false; btn.textContent = "拉取模型"; }
+  }
 }
 async function aiDeleteLocal() {
   try {

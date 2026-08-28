@@ -202,3 +202,68 @@ async def test_migrate_off_cleans_orphan(tmp_path):
     rows = dict(conn.execute("SELECT key, value FROM settings").fetchall())
     assert "ai_mode" not in rows
     conn.close()
+
+
+async def test_ollama_pull_success(monkeypatch):
+    from paas.interpreter.core import ollama_pull
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+        async def aread(self):
+            return b"{}"
+
+    class FakeCM:
+        async def __aenter__(self):
+            return FakeResp()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            return FakeCM()
+
+    monkeypatch.setattr("paas.interpreter.core.httpx.AsyncClient", FakeClient)
+    ok, msg = await ollama_pull("qwen2.5:0.5b", "http://localhost:11434")
+    assert ok is True
+    assert "已就绪" in msg
+
+
+async def test_ollama_pull_connection_refused_message(monkeypatch):
+    from paas.interpreter.core import ollama_pull
+
+    class FakeCM:
+        async def __aenter__(self):
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, *a, **k):
+            return FakeCM()
+
+    monkeypatch.setattr("paas.interpreter.core.httpx.AsyncClient", FakeClient)
+    ok, msg = await ollama_pull("qwen2.5:0.5b", "http://localhost:11434")
+    assert ok is False
+    assert "docker compose --profile ai up -d" in msg

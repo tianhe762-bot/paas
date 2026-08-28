@@ -360,7 +360,7 @@ async def ai_pull(request: Request, body: dict | None = None) -> dict:
     model = (body or {}).get("model") or "qwen2.5:0.5b"
     conn = connect()
     try:
-        base = admin_service.get_ai_settings(conn).get("base_url") or "http://localhost:11434"
+        base = admin_service.get_ai_settings(conn).get("local_base_url") or "http://localhost:11434"
     finally:
         conn.close()
     ok, msg = await ollama_pull(model, base)

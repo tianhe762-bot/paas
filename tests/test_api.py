@@ -305,6 +305,41 @@ async def test_ai_disabled_and_enabled(client, monkeypatch):
     assert calls == ["今天微信吃饭花了25", "今天微信吃饭花了35"]
 
 
+async def test_ai_pull_uses_local_base_url(client, monkeypatch):
+    """/admin/api/ai/pull 必须使用 local_base_url（曾误读不存在的 base_url）。"""
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    put = await client.put(
+        "/admin/api/ai",
+        json={
+            "local_enabled": True,
+            "local_model": "qwen2.5:0.5b",
+            "local_base_url": "http://192.168.9.9:11434",
+            "cloud_enabled": False,
+            "cloud_model": "",
+            "cloud_base_url": "",
+            "api_key": "",
+            "order": "rules,local,cloud",
+            "timeout_seconds": "45",
+        },
+    )
+    assert put.status_code == 200
+
+    seen = {}
+
+    async def fake_pull(model, base_url=None):
+        seen["model"] = model
+        seen["base"] = base_url
+        return True, "模型已就绪"
+
+    monkeypatch.setattr("paas.interpreter.core.ollama_pull", fake_pull)
+    r = await client.post("/admin/api/ai/pull", json={"model": "qwen2.5:0.5b"})
+    assert r.status_code == 200
+    assert seen.get("base") == "http://192.168.9.9:11434"
+    assert r.json()["ok"] is True
+
+
 async def test_conversations_api(client):
     headers = {"X-Api-Key": "test-api-key"}
     await client.post(

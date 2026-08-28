@@ -216,7 +216,14 @@ async def ollama_pull(model: str, base_url: str | None = None) -> tuple[bool, st
                 await resp.aread()
         return True, f"模型 {model} 已就绪"
     except Exception as exc:  # noqa: BLE001
-        return False, f"拉取失败（请确认已启动 ollama 容器：docker compose --profile ai up -d）：{exc}"
+        err = str(exc)
+        if "ConnectError" in err or "Connection refused" in err or "拒绝连接" in err:
+            return False, (
+                f"无法连接 Ollama（{base}）。Ollama 是独立容器，默认未启动：\n"
+                "请在服务器执行以下命令启动它，然后回到本页点「查看状态」确认在线，再重新拉取：\n"
+                "cd /opt/paas && docker compose --profile ai up -d"
+            )
+        return False, f"拉取失败：{err}"
 
 
 async def ollama_rm(model: str, base_url: str | None = None) -> tuple[bool, str]:
@@ -228,4 +235,3 @@ async def ollama_rm(model: str, base_url: str | None = None) -> tuple[bool, str]
         return True, f"模型 {model} 已删除"
     except Exception as exc:  # noqa: BLE001
         return False, f"删除失败：{exc}"
-

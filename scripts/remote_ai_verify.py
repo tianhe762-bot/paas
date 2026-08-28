@@ -7,6 +7,7 @@ import os
 import sqlite3
 import urllib.error
 import urllib.request
+import http.cookiejar
 
 BASE = os.environ.get("PAAS_BASE", "http://127.0.0.1:8000")
 API_KEY = os.environ.get("PAAS_API_KEY", "")
@@ -14,6 +15,7 @@ ENV = "/opt/paas/.env"
 DB = "/opt/paas/data/account.db"
 NS = "selftest_ai_20260829"
 USER = "u_ai_verify"
+COOKIE_JAR = http.cookiejar.CookieJar()
 
 
 def env_value(key):
@@ -36,7 +38,8 @@ def http(method, path, data=None, headers=None):
         method=method,
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIE_JAR))
+        with opener.open(req, timeout=30) as r:
             body = r.read()
             return r.status, json.loads(body) if body else None
     except urllib.error.HTTPError as e:
@@ -78,7 +81,7 @@ def show(label, result):
 
 def main():
     print("== 1. 管理员登录 + AI 设置 ==")
-    admin_pass = env_value("ADMIN_PASSWORD")
+    admin_pass = os.environ.get("PAAS_ADMIN_PASSWORD", "") or env_value("ADMIN_PASSWORD")
     if not API_KEY:
         print("API_KEY 缺失，跳过管理 API 与入站测试")
         return
@@ -87,15 +90,11 @@ def main():
         "/admin/api/login",
         {"username": "admin", "password": admin_pass},
     )
-    token = None
-    if login[0] == 200 and login[1]:
-        token = login[1].get("token")
-        print(f"login ok token_len={len(token or '')}")
+    if login[0] == 200:
+        print("login ok (cookie session)")
     else:
         print(f"login failed http={login[0]} detail={login[1]}")
     ai_headers = {"Content-Type": "application/json"}
-    if token:
-        ai_headers["Authorization"] = f"Bearer {token}"
 
     st, ai = http("GET", "/admin/api/ai", headers=ai_headers)
     print(f"GET /admin/api/ai http={st}")
@@ -121,6 +120,7 @@ def main():
             print(f"  [FAIL] {label} {extra}")
             failures.append(label)
 
+    ai_any_enabled = bool(ai and (ai.get("local_enabled") or ai.get("cloud_enabled")))
     print("\n== 2. 业务回归（临时命名空间，自动清理）==")
     n = {"i": 0}
 
@@ -149,8 +149,11 @@ def main():
     show("确认修改", inbound(nid(), "是"))
     show("平账", inbound(nid(), "微信平账到80"))
     show("确认平账", inbound(nid(), "是"))
-    ai_manual = show("手动AI(未启用)", inbound(nid(), "用AI：今天微信吃饭花了25"))
-    check("AI未启用提示", "未启用" in (ai_manual.get("reply_content") or ""))
+    ai_manual = show("手动AI", inbound(nid(), "用AI：今天微信吃饭花了25"))
+    if not ai_any_enabled:
+        check("AI未启用提示", "未启用" in (ai_manual.get("reply_content") or ""))
+    else:
+        print("  [INFO] AI 已启用，跳过“未启用”断言")
     show("今日统计", inbound(nid(), "今天"))
     show("防抖确认", inbound(nid(), "今天微信吃饭花了25"))
 
