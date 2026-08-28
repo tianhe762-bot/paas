@@ -227,17 +227,17 @@ docker pull alpine:3.20   # 验证加速源可用
 - **安全**：修改管理员密码。
 - **状态与备份**：各适配器运行状态、最近错误、记账/导入笔数、立即热备份、下载导入模板、最近导入记录。
 - **更新与卸载（仅管理员）**：
-  - 一键模式（可选，需启用 `compose.maintenance.yaml`）：更新（重建重启）、卸载保留数据（停容器保留 data/）、卸载删除全部数据（停容器+删数据+删镜像，需输入确认短语）。
-  - 默认未启用时，页面展示可直接复制的手动命令（`git pull && docker compose up -d --build`、`docker compose down`、`docker compose down && rm -rf data logs && docker rmi paas:latest`）。
+  - 一键模式（默认开启）：更新（重建重启）、卸载保留数据（停容器保留 data/）、卸载删除全部数据（停容器+删数据+删镜像，需输入确认短语）。
+  - 若一键模式不可用，页面展示可直接复制的手动命令（`git pull && docker compose up -d --build`、`docker compose down`、`docker compose down && rm -rf data logs && docker rmi paas:latest`）。
 
-### 启用网页端一键维护（可选）
+### 网页端一键维护（默认开启）
 
 ```bash
-# 编辑 .env 确认 PAAS_HOST_PROJECT=/opt/paas 指向项目实际路径
-docker compose -f compose.yaml -f compose.maintenance.yaml up -d
+# 编辑 .env 确认 PAAS_HOST_PROJECT=/opt/paas 指向项目实际路径（默认值即 /opt/paas）
+docker compose up -d --build
 ```
 
-> ⚠️ 该模式会向容器挂载 Docker socket（等价于授予容器宿主机控制权），仅建议个人自用服务器开启；介意的话保持默认，用页面上的手动命令即可。
+> ⚠️ 该模式会向容器挂载 Docker socket（等价于授予容器宿主机控制权），仅建议个人自用服务器开启；介意的话在 `.env` 设置 `PAAS_MAINTENANCE=0`，并移除 `compose.yaml` 中 paas 服务的 docker.sock / host-paas 挂载后重新 `docker compose up -d`，页面将退回显示手动命令。
 
 ## 可选 AI 识别
 

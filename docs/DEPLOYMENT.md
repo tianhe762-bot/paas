@@ -41,6 +41,8 @@ docker compose up -d --build
 docker compose logs -f paas
 ```
 
+> 网页端「更新与卸载」一键模式默认开启：compose.yaml 会向容器挂载 Docker socket 与项目目录（`PAAS_HOST_PROJECT`，默认 `/opt/paas`）。这等价于把宿主机 Docker 控制权交给容器，仅建议个人自用服务器；如需关闭，在 `.env` 设置 `PAAS_MAINTENANCE=0` 并移除 compose.yaml 中对应挂载后重建。
+
 5. 打开 `http://<服务器IP>:8000/admin` 配置机器人。
 
 ## Docker Hub 慢（国内服务器）

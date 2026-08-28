@@ -1,6 +1,6 @@
-"""网页端"更新与卸载"：可选一键维护（需挂载 Docker socket + 项目目录）。
+"""网页端"更新与卸载"：一键维护（默认启用，需挂载 Docker socket + 项目目录）。
 
-默认不启用一键模式；启用方式见 compose.maintenance.yaml 与 README。
+默认通过 compose.yaml 挂载 Docker socket 与项目目录；PAAS_MAINTENANCE=0 可关闭。
 不可用时，管理面板展示手动命令。
 """
 
@@ -27,7 +27,7 @@ def host_project_dir() -> str:
 
 def maintenance_available() -> tuple[bool, str]:
     if os.environ.get("PAAS_MAINTENANCE", "0") != "1":
-        return False, "未启用一键维护模式（需使用 compose.maintenance.yaml 覆盖启动）"
+        return False, "未启用一键维护模式（PAAS_MAINTENANCE=0；可在 .env 改为 1 后重建）"
     if not SOCKET.exists():
         return False, "未挂载 Docker socket（/var/run/docker.sock）"
     if not (HOST_PROJECT / "compose.yaml").exists():
@@ -118,4 +118,3 @@ async def run_maintenance(action: str, confirm: str) -> dict:
             f"查看进度：docker logs -f {name}；本机日志：logs/maintenance.log"
         ),
     }
-

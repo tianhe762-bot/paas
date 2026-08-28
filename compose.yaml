@@ -10,9 +10,16 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       TELEGRAM_PROXY: ${TELEGRAM_PROXY:-}
+      # 网页端"更新与卸载"一键模式：默认开启（PAAS_MAINTENANCE=0 可关闭）
+      PAAS_MAINTENANCE: ${PAAS_MAINTENANCE:-1}
+      PAAS_HOST_PROJECT: ${PAAS_HOST_PROJECT:-/opt/paas}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      # 一键维护需要访问宿主机 Docker 与项目目录（见 README 安全说明）
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PAAS_HOST_PROJECT:-/opt/paas}:/host-paas:ro
+      - ${PAAS_HOST_PROJECT:-/opt/paas}/data:/host-paas-data
 
   # 可选本地 AI：启用方式 docker compose --profile ai up -d
   ollama:
