@@ -102,8 +102,9 @@ docker compose logs -f paas        # 查看启动日志
 ```
 
 5. 打开管理界面：`http://<服务器IP>:8000/admin`
-   - 用 `.env` 里的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录。
+   - **首次部署**：启动日志会打印管理界面链接、用户名与初始密码；同一信息也写入 `data/admin_credentials.txt`（权限 600）。若 `.env` 未设置 `ADMIN_PASSWORD`，系统会自动生成随机初始密码。
    - 页面右上角应显示版本号（如 `v2.1`）；如仍显示旧版请按 **Ctrl+F5** 强刷。
+   - 登录后请立即在「安全」页修改密码，并删除 `data/admin_credentials.txt`。
 
 6. 在「平台配置」里接入 QQ 或 Telegram（见下），保存并启用。
 
@@ -225,6 +226,18 @@ docker pull alpine:3.20   # 验证加速源可用
 - **系统设置**：时区、提醒时间（默认 21,22,0）、提醒文案、防抖窗口（秒）、待确认有效期（秒）、备份保留天数、每日备份时间。
 - **安全**：修改管理员密码。
 - **状态与备份**：各适配器运行状态、最近错误、记账/导入笔数、立即热备份、下载导入模板、最近导入记录。
+- **更新与卸载（仅管理员）**：
+  - 一键模式（可选，需启用 `compose.maintenance.yaml`）：更新（重建重启）、卸载保留数据（停容器保留 data/）、卸载删除全部数据（停容器+删数据+删镜像，需输入确认短语）。
+  - 默认未启用时，页面展示可直接复制的手动命令（`git pull && docker compose up -d --build`、`docker compose down`、`docker compose down && rm -rf data logs && docker rmi paas:latest`）。
+
+### 启用网页端一键维护（可选）
+
+```bash
+# 编辑 .env 确认 PAAS_HOST_PROJECT=/opt/paas 指向项目实际路径
+docker compose -f compose.yaml -f compose.maintenance.yaml up -d
+```
+
+> ⚠️ 该模式会向容器挂载 Docker socket（等价于授予容器宿主机控制权），仅建议个人自用服务器开启；介意的话保持默认，用页面上的手动命令即可。
 
 ## 历史账本导入
 

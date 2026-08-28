@@ -3,6 +3,7 @@ import io
 import logging
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
 from paas import settings_store
@@ -53,16 +54,50 @@ def ensure_admin(conn) -> str:
     password = settings.admin_password
     if not password:
         password = secrets.token_urlsafe(12)
-        log.warning(
-            "未设置 ADMIN_PASSWORD，已生成初始密码（仅本次日志可见，请登录后立即修改）: %s",
-            password,
-        )
     conn.execute(
         "INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, 'admin')",
         (username, hash_password(password)),
     )
     conn.commit()
+    _write_first_run_credentials(username, password)
+    _log_first_run_welcome(username, password)
     return username
+
+
+def _credential_file() -> Path:
+    path = Path(settings.data_dir)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "admin_credentials.txt"
+
+
+def _write_first_run_credentials(username: str, password: str) -> None:
+    target = _credential_file()
+    target.write_text(
+        "PAAS 管理界面\n"
+        "=============\n"
+        "管理界面：http://<服务器IP>:8000/admin （本机访问为 http://127.0.0.1:8000/admin）\n"
+        f"用户名：{username}\n"
+        f"密码：{password}\n"
+        "\n请登录后立即在「安全」页修改密码，并删除本文件。\n",
+        encoding="utf-8",
+    )
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _log_first_run_welcome(username: str, password: str) -> None:
+    line = "=" * 46
+    log.warning(
+        "\n%s\nPAAS 首次部署完成，请用以下信息登录管理界面：\n"
+        "管理界面：http://<服务器IP>:8000/admin （本机访问 http://127.0.0.1:8000/admin）\n"
+        "用户名：%s\n密码：%s\n"
+        "（密码已同时写入 data/admin_credentials.txt，登录后请及时修改密码并删除该文件）\n%s",
+        line, username, password, line,
+    )
 
 
 # ---------- 登录会话 ----------

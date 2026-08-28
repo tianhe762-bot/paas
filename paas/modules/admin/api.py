@@ -68,6 +68,11 @@ class BackfillBody(BaseModel):
     mappings: list[dict[str, str]] = []
 
 
+class MaintenanceBody(BaseModel):
+    action: str
+    confirm: str = ""
+
+
 def _require_session(request: Request) -> str:
     token = request.cookies.get("paas_session")
     if not admin_service.check_session(token):
@@ -383,6 +388,29 @@ def backfill_apply(request: Request, body: BackfillBody) -> dict:
         return account_service.backfill_apply(conn, body.namespace, body.user_id, body.mappings)
     finally:
         conn.close()
+
+
+# ---------- 更新与卸载 ----------
+
+@router.get("/maintenance/status")
+def maintenance_status(request: Request) -> dict:
+    _require_admin(request)
+    from paas.modules import maintenance
+
+    ok, reason = maintenance.maintenance_available()
+    return {
+        "available": ok,
+        "reason": reason,
+        "commands": maintenance.commands_text(),
+    }
+
+
+@router.post("/maintenance/run")
+async def maintenance_run(request: Request, body: MaintenanceBody) -> dict:
+    _require_admin(request)
+    from paas.modules import maintenance
+
+    return await maintenance.run_maintenance(body.action, body.confirm)
 
 
 # ---------- 状态 / 设置 / 备份 / 导入导出 ----------

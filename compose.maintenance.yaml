@@ -1,0 +1,12 @@
+# 可选：网页端"更新与卸载"一键模式覆盖文件
+# 启用方式：docker compose -f compose.yaml -f compose.maintenance.yaml up -d
+# 注意：会向容器挂载 Docker socket（等价于授予容器宿主机控制权），仅建议个人自用开启。
+services:
+  paas:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PAAS_HOST_PROJECT:-/opt/paas}:/host-paas:ro
+      - ${PAAS_HOST_PROJECT:-/opt/paas}/data:/host-paas-data
+    environment:
+      PAAS_MAINTENANCE: "1"
+      PAAS_HOST_PROJECT: ${PAAS_HOST_PROJECT:-/opt/paas}

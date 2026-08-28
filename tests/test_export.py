@@ -1,21 +1,6 @@
 import csv
 import io
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from tests.test_api import _prepare_app
-
-
-@pytest.fixture()
-async def client(tmp_path):
-    app = _prepare_app(tmp_path / "export.db")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-    await app.state.router.shutdown()
-
-
 async def _seed(client, user_id="u_export"):
     headers = {"X-Api-Key": "test-api-key"}
     for mid, content in [

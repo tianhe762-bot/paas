@@ -80,6 +80,7 @@
   <div class="nav" style="margin-top:16px">
     <button class="active" data-tab="bots" onclick="showTab('bots')">机器人管理</button>
     <button data-tab="users" id="usersTab" onclick="showTab('users')">用户管理</button>
+    <button data-tab="maintenance" id="maintenanceTab" onclick="showTab('maintenance')">更新卸载</button>
     <button data-tab="settings" onclick="showTab('settings')">系统设置</button>
     <button data-tab="security" onclick="showTab('security')">安全</button>
     <button data-tab="status" onclick="showTab('status')">状态与备份</button>
@@ -157,6 +158,36 @@
         </div>
       </div>
       <div style="margin-top:12px"><button class="btn-primary" onclick="addUser()">创建用户</button><span class="msg" id="msg-user"></span></div>
+    </div>
+  </div>
+
+  <div id="tab-maintenance" class="hidden">
+    <div class="card">
+      <div class="flex"><h2 style="margin:0">更新与卸载</h2><span class="tag" id="maintAvail">检测中…</span></div>
+      <p class="muted" id="maintReason"></p>
+      <div class="row" style="margin-top:8px">
+        <div class="card" style="margin:0">
+          <strong>更新到最新代码</strong>
+          <p class="muted">一键模式基于当前项目目录重建并重启容器；如需先拉取最新代码，请先执行手动命令。</p>
+          <button class="btn-primary" onclick="runMaintenance('update')">一键更新</button>
+        </div>
+        <div class="card" style="margin:0">
+          <strong>卸载（保留个人数据）</strong>
+          <p class="muted">停止并移除容器，保留 data/ 数据目录；之后可随时重新部署恢复。</p>
+          <button class="btn-ghost" onclick="runMaintenance('uninstall_keep')">一键卸载（保留数据）</button>
+        </div>
+        <div class="card" style="margin:0">
+          <strong>卸载（删除全部数据）</strong>
+          <p class="muted">停止并移除容器与镜像，<b>删除全部账本数据，不可恢复</b>。请输入确认短语。</p>
+          <input id="maintConfirm" placeholder="输入：删除全部数据">
+          <div style="margin-top:8px"><button class="btn-danger" onclick="runMaintenance('uninstall_all')">卸载并删除全部数据</button></div>
+        </div>
+      </div>
+      <div style="margin-top:14px"><span class="msg" id="msg-maintenance"></span></div>
+    </div>
+    <div class="card">
+      <h2>手动命令（无需开启一键模式）</h2>
+      <div id="maintCommands"></div>
     </div>
   </div>
 
@@ -287,15 +318,48 @@ async function loadApp() {
   document.getElementById("who").textContent = me.username;
   document.getElementById("roleTag").textContent = me.role === "admin" ? "管理员" : "普通用户";
   document.getElementById("usersTab").classList.toggle("hidden", me.role !== "admin");
+  document.getElementById("maintenanceTab").classList.toggle("hidden", me.role !== "admin");
   await Promise.all([loadBots(), loadSettings(), loadStatus()]);
   if (me.role !== "admin") showTab("bots");
 }
 function showTab(name) {
   document.querySelectorAll(".nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
   ["bots", "users", "settings", "security", "status"].forEach(t => document.getElementById("tab-" + t).classList.toggle("hidden", t !== name));
+  document.getElementById("tab-maintenance").classList.toggle("hidden", name !== "maintenance");
   if (name === "bots") loadBots();
   if (name === "users" && currentUser && currentUser.role === "admin") loadUsers();
+  if (name === "maintenance" && currentUser && currentUser.role === "admin") loadMaintenance();
   if (name === "status") loadStatus();
+}
+
+async function loadMaintenance() {
+  try {
+    const r = await api("/admin/api/maintenance/status");
+    document.getElementById("maintAvail").textContent = r.available ? "一键模式已开启" : "一键模式未开启";
+    document.getElementById("maintReason").textContent = r.reason || "";
+    const box = document.getElementById("maintCommands");
+    box.innerHTML = "";
+    const labels = {update: "更新：", uninstall_keep: "卸载保留数据：", uninstall_all: "卸载删除全部数据："};
+    for (const [k, cmd] of Object.entries(r.commands || {})) {
+      const p = document.createElement("p");
+      const b = document.createElement("code");
+      b.textContent = cmd;
+      p.appendChild(document.createTextNode(labels[k] || k + "："));
+      p.appendChild(b);
+      box.appendChild(p);
+    }
+  } catch (e) { showMsg("msg-maintenance", "加载失败：" + e.message, false); }
+}
+async function runMaintenance(action) {
+  try {
+    const confirm = document.getElementById("maintConfirm").value.trim();
+    if (action === "uninstall_all" && confirm !== "删除全部数据") {
+      showMsg("msg-maintenance", "请输入确认短语「删除全部数据」", false);
+      return;
+    }
+    const r = await api("/admin/api/maintenance/run", {method: "POST", body: JSON.stringify({action, confirm})});
+    showMsg("msg-maintenance", r.ok ? r.message : "操作失败：" + r.error, r.ok);
+  } catch (e) { showMsg("msg-maintenance", "操作失败：" + e.message, false); }
 }
 
 // ---------- 机器人 ----------

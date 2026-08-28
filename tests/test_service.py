@@ -235,3 +235,44 @@ def test_import_staging_merge_dedup(conn):
     sid2 = s.create_import_staging(conn, "default", "u_st", "qq", "st2", "a.csv", items)
     result2 = s.merge_staged(conn, sid2, "default", "u_st", "qq")
     assert result2["new"] == 0 and result2["skip"] == 2
+
+
+def test_first_run_credentials_file(tmp_path):
+    from paas.config import settings as st
+    from paas.db import connect, init_db
+    from paas.modules.admin import service as admin_service
+
+    st.data_dir = tmp_path / "data"
+    st.db_path = tmp_path / "a.db"
+    st.secret_key_path = tmp_path / "k"
+    st.admin_password = ""
+    st.admin_username = "admin"
+    conn = connect()
+    init_db(conn)
+    username = admin_service.ensure_admin(conn)
+    conn.close()
+    f = tmp_path / "data" / "admin_credentials.txt"
+    assert f.exists()
+    content = f.read_text(encoding="utf-8")
+    assert "8000/admin" in content
+    assert username in content
+    assert "密码" in content
+
+
+def test_first_run_credentials_env_password(tmp_path):
+    from paas.config import settings as st
+    from paas.db import connect, init_db
+    from paas.modules.admin import service as admin_service
+
+    st.data_dir = tmp_path / "data2"
+    st.db_path = tmp_path / "b.db"
+    st.secret_key_path = tmp_path / "k2"
+    st.admin_password = "my-custom-pass-123"
+    st.admin_username = "boss"
+    conn = connect()
+    init_db(conn)
+    admin_service.ensure_admin(conn)
+    conn.close()
+    content = (tmp_path / "data2" / "admin_credentials.txt").read_text(encoding="utf-8")
+    assert "boss" in content
+    assert "my-custom-pass-123" in content
