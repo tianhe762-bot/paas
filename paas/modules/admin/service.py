@@ -40,6 +40,8 @@ SECRET_FIELDS = {
     "telegram": {"token"},
 }
 
+MAX_BOTS_PER_PLATFORM = 5
+
 
 def ensure_admin(conn) -> str:
     row = conn.execute(
@@ -56,7 +58,7 @@ def ensure_admin(conn) -> str:
             password,
         )
     conn.execute(
-        "INSERT INTO admin_users (username, password_hash) VALUES (?, ?)",
+        "INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, 'admin')",
         (username, hash_password(password)),
     )
     conn.commit()
@@ -69,7 +71,7 @@ def login(username: str, password: str) -> str | None:
     conn = connect()
     try:
         row = conn.execute(
-            "SELECT username, password_hash FROM admin_users WHERE username = ?",
+            "SELECT username, password_hash, role FROM admin_users WHERE username = ?",
             (username,),
         ).fetchone()
     finally:
@@ -79,6 +81,7 @@ def login(username: str, password: str) -> str | None:
     token = new_session_token()
     SESSIONS[token] = {
         "username": row["username"],
+        "role": row["role"],
         "expires_at": time.time() + settings.session_ttl_hours * 3600,
     }
     return token
@@ -94,6 +97,17 @@ def check_session(token: str | None) -> bool:
         SESSIONS.pop(token, None)
         return False
     return True
+
+
+def session_info(token: str | None) -> dict | None:
+    if not check_session(token):
+        return None
+    return SESSIONS.get(token)
+
+
+def is_admin(token: str | None) -> bool:
+    info = session_info(token)
+    return bool(info and info.get("role") == "admin")
 
 
 def logout(token: str | None) -> None:
@@ -121,85 +135,165 @@ def change_password(username: str, old_password: str, new_password: str) -> tupl
         conn.close()
 
 
-# ---------- 平台配置 ----------
+# ---------- 机器人 CRUD ----------
 
-def get_config(conn, platform: str) -> dict[str, Any]:
-    defaults = dict(CONFIG_DEFAULTS.get(platform, {}))
+def _gen_bot_id() -> str:
+    return "b" + secrets.token_hex(4)
+
+
+def list_bots(conn, viewer_id: int, admin: bool) -> list[dict]:
+    q = "SELECT * FROM bot_configs"
+    params: list[Any] = []
+    if not admin:
+        q += " WHERE owner_id = ?"
+        params.append(viewer_id)
+    q += " ORDER BY platform, id"
+    out = []
+    for row in conn.execute(q, params).fetchall():
+        d = dict(row)
+        d["config"] = get_bot_fields(conn, row["bot_id"])
+        out.append(d)
+    return out
+
+
+def get_bot(conn, bot_id: str) -> dict | None:
     row = conn.execute(
-        "SELECT enabled, config_enc, status, last_error FROM bot_configs WHERE platform = ?",
-        (platform,),
+        "SELECT * FROM bot_configs WHERE bot_id = ?", (bot_id,)
     ).fetchone()
-    cfg = {"enabled": False, "status": "stopped", "last_error": "", "fields": defaults}
     if row is None:
-        return cfg
-    cfg["enabled"] = bool(row["enabled"])
-    cfg["status"] = row["status"] or "stopped"
-    cfg["last_error"] = row["last_error"] or ""
-    try:
-        stored = decrypt_json(row["config_enc"]) if row["config_enc"] else {}
-    except Exception:  # noqa: BLE001
-        stored = {}
-    merged = {**defaults, **stored}
-    for field in SECRET_FIELDS.get(platform, set()):
-        if merged.get(field):
-            merged[field] = ""
-            merged[f"has_{field}"] = True
-        else:
-            merged[f"has_{field}"] = False
-    cfg["fields"] = merged
-    return cfg
+        return None
+    d = dict(row)
+    d["config"] = get_bot_fields(conn, bot_id)
+    return d
 
 
-def set_config(conn, platform: str, fields: dict[str, Any], enabled: bool) -> None:
-    defaults = dict(CONFIG_DEFAULTS.get(platform, {}))
-    existing: dict[str, Any] = {}
+def get_bot_fields(conn, bot_id: str) -> dict[str, Any]:
     row = conn.execute(
-        "SELECT config_enc FROM bot_configs WHERE platform = ?", (platform,)
+        "SELECT config_enc FROM bot_configs WHERE bot_id = ?", (bot_id,)
     ).fetchone()
+    defaults = {}
+    stored: dict[str, Any] = {}
     if row and row["config_enc"]:
+        try:
+            stored = decrypt_json(row["config_enc"])
+        except Exception:  # noqa: BLE001
+            stored = {}
+        platform = conn.execute(
+            "SELECT platform FROM bot_configs WHERE bot_id = ?", (bot_id,)
+        ).fetchone()
+        if platform:
+            defaults = dict(CONFIG_DEFAULTS.get(platform["platform"], {}))
+    merged = {**defaults, **stored}
+    platform = conn.execute(
+        "SELECT platform FROM bot_configs WHERE bot_id = ?", (bot_id,)
+    ).fetchone()
+    platform_name = platform["platform"] if platform else ""
+    for field in SECRET_FIELDS.get(platform_name, set()):
+        merged[field] = ""
+        merged[f"has_{field}"] = bool(stored.get(field))
+    return merged
+
+
+def create_bot(
+    conn, owner_id: int, platform: str, name: str, fields: dict[str, Any], enabled: bool
+) -> tuple[bool, str]:
+    if platform not in CONFIG_DEFAULTS:
+        return False, "未知平台"
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM bot_configs WHERE platform = ?", (platform,)
+    ).fetchone()["n"]
+    if count >= MAX_BOTS_PER_PLATFORM:
+        return False, f"该平台最多 {MAX_BOTS_PER_PLATFORM} 个机器人"
+    bot_id = _gen_bot_id()
+    merged = dict(CONFIG_DEFAULTS[platform])
+    for key, value in fields.items():
+        if key in merged:
+            merged[key] = str(value).strip()
+    conn.execute(
+        """
+        INSERT INTO bot_configs
+            (platform, bot_id, owner_id, name, enabled, config_enc, status, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'stopped', datetime('now'))
+        """,
+        (platform, bot_id, owner_id, name or platform, 1 if enabled else 0, encrypt_json(merged)),
+    )
+    conn.commit()
+    return True, bot_id
+
+
+def update_bot(
+    conn, bot_id: str, fields: dict[str, Any] | None = None,
+    enabled: bool | None = None, name: str | None = None,
+) -> bool:
+    row = conn.execute(
+        "SELECT platform, config_enc FROM bot_configs WHERE bot_id = ?", (bot_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    platform = row["platform"]
+    existing: dict[str, Any] = {}
+    if row["config_enc"]:
         try:
             existing = decrypt_json(row["config_enc"])
         except Exception:  # noqa: BLE001
             existing = {}
-    merged = {**defaults, **existing}
-    for key, value in fields.items():
-        if key not in defaults:
-            continue
-        if key in SECRET_FIELDS.get(platform, set()) and value in ("", "••••••••"):
-            continue  # 掩码/空值表示保留原值
-        merged[key] = str(value).strip()
+    merged = {**CONFIG_DEFAULTS.get(platform, {}), **existing}
+    if fields:
+        for key, value in fields.items():
+            if key not in merged:
+                continue
+            if key in SECRET_FIELDS.get(platform, set()) and str(value) in ("", "••••••••"):
+                continue
+            merged[key] = str(value).strip()
+    sets = ["config_enc = ?", "updated_at = datetime('now')"]
+    params: list[Any] = [encrypt_json(merged)]
+    if enabled is not None:
+        sets.append("enabled = ?")
+        params.append(1 if enabled else 0)
+    if name is not None:
+        sets.append("name = ?")
+        params.append(name)
+    params.append(bot_id)
     conn.execute(
-        """
-        INSERT INTO bot_configs (platform, enabled, config_enc, status, last_error, updated_at)
-        VALUES (?, ?, ?, 'stopped', '', datetime('now'))
-        ON CONFLICT(platform) DO UPDATE SET
-            enabled = excluded.enabled,
-            config_enc = excluded.config_enc,
-            status = 'stopped',
-            last_error = '',
-            updated_at = datetime('now')
-        """,
-        (platform, 1 if enabled else 0, encrypt_json(merged)),
+        f"UPDATE bot_configs SET {', '.join(sets)}, status='stopped', last_error='' WHERE bot_id = ?",
+        params,
     )
     conn.commit()
+    return True
 
 
-async def test_config(platform: str, fields: dict[str, Any]) -> tuple[bool, str]:
+def delete_bot(conn, bot_id: str) -> bool:
+    row = conn.execute(
+        "SELECT platform FROM bot_configs WHERE bot_id = ?", (bot_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    for table in (
+        "expenses", "accounts", "daily_status", "pending_actions",
+        "user_chats", "raw_messages", "imports",
+    ):
+        conn.execute(f"DELETE FROM {table} WHERE namespace = ?", (bot_id,))
+    conn.execute("DELETE FROM bot_configs WHERE bot_id = ?", (bot_id,))
+    conn.commit()
+    return True
+
+
+async def test_config(platform: str, fields: dict[str, Any], bot_id: str | None = None) -> tuple[bool, str]:
     if platform not in CONFIG_DEFAULTS:
         return False, "未知平台"
     merged: dict[str, Any] = dict(CONFIG_DEFAULTS[platform])
-    # 测试连接时，留空/掩码字段沿用已保存的配置，避免把占位符当真实密钥
     conn = connect()
     try:
-        row = conn.execute(
-            "SELECT config_enc FROM bot_configs WHERE platform = ?", (platform,)
-        ).fetchone()
-        if row and row["config_enc"]:
-            try:
-                stored = decrypt_json(row["config_enc"])
-                merged.update({k: v for k, v in stored.items() if k in merged})
-            except Exception:  # noqa: BLE001
-                pass
+        if bot_id:
+            row = conn.execute(
+                "SELECT config_enc FROM bot_configs WHERE bot_id = ?", (bot_id,)
+            ).fetchone()
+            if row and row["config_enc"]:
+                try:
+                    stored = decrypt_json(row["config_enc"])
+                    merged.update({k: v for k, v in stored.items() if k in merged})
+                except Exception:  # noqa: BLE001
+                    pass
     finally:
         conn.close()
     for key, value in fields.items():
@@ -227,6 +321,53 @@ async def test_config(platform: str, fields: dict[str, Any]) -> tuple[bool, str]
         finally:
             await adapter.stop()
     return False, "未知平台"
+
+
+# ---------- 用户管理（仅管理员） ----------
+
+def list_users(conn) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, username, role, created_at FROM admin_users ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_user(conn, username: str, password: str, role: str = "user") -> tuple[bool, str]:
+    username = (username or "").strip()
+    if not username or len(password) < 8:
+        return False, "用户名不能为空，密码至少 8 位"
+    if role not in ("admin", "user"):
+        return False, "角色必须是 admin 或 user"
+    try:
+        conn.execute(
+            "INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)",
+            (username, hash_password(password), role),
+        )
+        conn.commit()
+        return True, "已创建"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"创建失败：{exc}"
+
+
+def delete_user(conn, user_id: int) -> tuple[bool, str]:
+    if user_id <= 0:
+        return False, "无效用户"
+    row = conn.execute(
+        "SELECT role FROM admin_users WHERE id = ?", (user_id,)
+    ).fetchone()
+    if row is None:
+        return False, "用户不存在"
+    if row["role"] == "admin":
+        others = conn.execute(
+            "SELECT COUNT(*) AS n FROM admin_users WHERE role = 'admin' AND id != ?",
+            (user_id,),
+        ).fetchone()["n"]
+        if others == 0:
+            return False, "至少保留一个管理员"
+    conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
+    conn.execute("UPDATE bot_configs SET owner_id = 0 WHERE owner_id = ?", (user_id,))
+    conn.commit()
+    return True, "已删除"
 
 
 # ---------- 设置 / 状态 / 备份 ----------
@@ -270,3 +411,4 @@ def import_template_csv() -> bytes:
     writer.writerow(["2026-08-02", 23, "交通", "打车回家"])
     writer.writerow(["2026-08-03", 35, "购物", "日用品"])
     return buf.getvalue().encode("utf-8-sig")
+

@@ -46,72 +46,74 @@ def _now_utc_str() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _upsert_daily_status(conn, user_id: str, day_iso: str, **flags: int) -> None:
+def _upsert_daily_status(conn, namespace: str, user_id: str, day_iso: str, **flags: int) -> None:
     sets = ", ".join(f"{k}=excluded.{k}" for k in flags)
-    cols = ", ".join(["user_id", "status_date", *flags.keys()])
-    placeholders = ", ".join(["?"] * (2 + len(flags)))
+    cols = ", ".join(["namespace", "user_id", "status_date", *flags.keys()])
+    placeholders = ", ".join(["?"] * (3 + len(flags)))
     conn.execute(
         f"""
         INSERT INTO daily_status ({cols}) VALUES ({placeholders})
-        ON CONFLICT(user_id, status_date) DO UPDATE SET {sets}
+        ON CONFLICT(namespace, user_id, status_date) DO UPDATE SET {sets}
         """,
-        (user_id, day_iso, *flags.values()),
+        (namespace, user_id, day_iso, *flags.values()),
     )
 
 
-def save_raw_message(conn, platform: str, message_id: str, user_id: str, content: str) -> None:
+def save_raw_message(conn, namespace: str, platform: str, message_id: str, user_id: str, content: str) -> None:
     if not content:
         return
     conn.execute(
         """
-        INSERT OR IGNORE INTO raw_messages (platform, message_id, user_id, content)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO raw_messages (namespace, platform, message_id, user_id, content)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (platform, message_id, user_id, content[:2000]),
+        (namespace, platform, message_id, user_id, content[:2000]),
     )
 
 
 # ---------- 账户 ----------
 
-def ensure_default_accounts(conn, user_id: str) -> None:
+def ensure_default_accounts(conn, namespace: str, user_id: str) -> None:
     existing = {
         r["name"]
         for r in conn.execute(
-            "SELECT name FROM accounts WHERE user_id = ?", (user_id,)
+            "SELECT name FROM accounts WHERE namespace = ? AND user_id = ?",
+            (namespace, user_id),
         ).fetchall()
     }
     for idx, name in enumerate(DEFAULT_ACCOUNTS):
         if name not in existing:
             conn.execute(
-                "INSERT INTO accounts (user_id, name, initial_balance_cents, sort_order) "
-                "VALUES (?, ?, 0, ?)",
-                (user_id, name, idx),
+                "INSERT INTO accounts (namespace, user_id, name, initial_balance_cents, sort_order) "
+                "VALUES (?, ?, ?, 0, ?)",
+                (namespace, user_id, name, idx),
             )
     conn.commit()
 
 
-def get_or_create_account(conn, user_id: str, name: str) -> int | None:
+def get_or_create_account(conn, namespace: str, user_id: str, name: str) -> int | None:
     name = (name or "").strip()
     if not name:
         return None
     row = conn.execute(
-        "SELECT id FROM accounts WHERE user_id = ? AND name = ?", (user_id, name)
+        "SELECT id FROM accounts WHERE namespace = ? AND user_id = ? AND name = ?",
+        (namespace, user_id, name),
     ).fetchone()
     if row is not None:
         return row["id"]
     cur = conn.execute(
-        "INSERT INTO accounts (user_id, name, initial_balance_cents, sort_order) "
-        "VALUES (?, ?, 0, 1000)",
-        (user_id, name),
+        "INSERT INTO accounts (namespace, user_id, name, initial_balance_cents, sort_order) "
+        "VALUES (?, ?, ?, 0, 1000)",
+        (namespace, user_id, name),
     )
     conn.commit()
     return cur.lastrowid
 
 
 def set_account_initial_balance(
-    conn, user_id: str, account: str, amount_cents: int
+    conn, namespace: str, user_id: str, account: str, amount_cents: int
 ) -> int | None:
-    account_id = get_or_create_account(conn, user_id, account)
+    account_id = get_or_create_account(conn, namespace, user_id, account)
     if account_id is None:
         return None
     conn.execute(
@@ -122,7 +124,7 @@ def set_account_initial_balance(
     return account_id
 
 
-def account_balances(conn, user_id: str) -> list[dict]:
+def account_balances(conn, namespace: str, user_id: str) -> list[dict]:
     rows = conn.execute(
         """
         SELECT a.id, a.name, a.initial_balance_cents,
@@ -139,12 +141,13 @@ def account_balances(conn, user_id: str) -> list[dict]:
                ), 0) AS delta
         FROM accounts a
         LEFT JOIN expenses e
-               ON e.account_id = a.id AND e.user_id = a.user_id AND e.status = 'normal'
-        WHERE a.user_id = ?
+               ON e.account_id = a.id AND e.namespace = a.namespace
+              AND e.user_id = a.user_id AND e.status = 'normal'
+        WHERE a.namespace = ? AND a.user_id = ?
         GROUP BY a.id, a.name, a.initial_balance_cents
         ORDER BY a.sort_order, a.id
         """,
-        (user_id,),
+        (namespace, user_id),
     ).fetchall()
     out = []
     for r in rows:
@@ -161,29 +164,29 @@ def account_balances(conn, user_id: str) -> list[dict]:
     return out
 
 
-def account_balance_by_name(conn, user_id: str, name: str) -> dict | None:
-    for acc in account_balances(conn, user_id):
+def account_balance_by_name(conn, namespace: str, user_id: str, name: str) -> dict | None:
+    for acc in account_balances(conn, namespace, user_id):
         if acc["name"] == name:
             return acc
     return None
 
 
-def total_assets(conn, user_id: str) -> int:
-    return sum(a["balance_cents"] for a in account_balances(conn, user_id))
+def total_assets(conn, namespace: str, user_id: str) -> int:
+    return sum(a["balance_cents"] for a in account_balances(conn, namespace, user_id))
 
 
 # ---------- 记账 ----------
 
 def record_items(
     conn,
+    namespace: str,
     user_id: str,
     items: list[ParsedItem],
     platform: str,
     message_id: str,
     raw_text: str = "",
 ) -> tuple[list[ParsedItem], list[ParsedItem]]:
-    """写入流水：message_id 唯一索引做防重；转账成对写入，手续费挂到上一笔转账。"""
-    ensure_default_accounts(conn, user_id)
+    ensure_default_accounts(conn, namespace, user_id)
     saved: list[ParsedItem] = []
     skipped: list[ParsedItem] = []
     last_transfer_id: int | None = None
@@ -191,17 +194,17 @@ def record_items(
         mid = f"{message_id}:{idx}" if len(items) > 1 else message_id
         try:
             if item.tx_type == "transfer_out":
-                from_id = get_or_create_account(conn, user_id, item.account_name or "未命名")
-                to_id = get_or_create_account(conn, user_id, item.to_account_name or "未命名")
+                from_id = get_or_create_account(conn, namespace, user_id, item.account_name or "未命名")
+                to_id = get_or_create_account(conn, namespace, user_id, item.to_account_name or "未命名")
                 cur = conn.execute(
                     """
                     INSERT INTO expenses
-                        (user_id, expense_date, category_id, account_id, to_account_id,
+                        (namespace, user_id, expense_date, category_id, account_id, to_account_id,
                          tx_type, amount_cents, description, platform, message_id, raw_text, status)
-                    VALUES (?, ?, ?, ?, ?, 'transfer_out', ?, ?, ?, ?, ?, 'normal')
+                    VALUES (?, ?, ?, ?, ?, ?, 'transfer_out', ?, ?, ?, ?, ?, 'normal')
                     """,
                     (
-                        user_id, item.expense_date.isoformat(), item.category_id,
+                        namespace, user_id, item.expense_date.isoformat(), item.category_id,
                         from_id, to_id, item.amount_cents, item.description,
                         platform, mid, raw_text,
                     ),
@@ -211,12 +214,12 @@ def record_items(
                 conn.execute(
                     """
                     INSERT INTO expenses
-                        (user_id, expense_date, category_id, account_id, to_account_id,
+                        (namespace, user_id, expense_date, category_id, account_id, to_account_id,
                          tx_type, amount_cents, description, platform, message_id, raw_text, status, ref_id)
-                    VALUES (?, ?, ?, ?, ?, 'transfer_in', ?, ?, ?, ?, ?, 'normal', ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 'transfer_in', ?, ?, ?, ?, ?, 'normal', ?)
                     """,
                     (
-                        user_id, item.expense_date.isoformat(), item.category_id,
+                        namespace, user_id, item.expense_date.isoformat(), item.category_id,
                         to_id, from_id, item.amount_cents,
                         f"{item.description}（转入）", platform, f"{mid}:in", raw_text, out_id,
                     ),
@@ -224,7 +227,7 @@ def record_items(
                 saved.append(item)
             else:
                 account_id = (
-                    get_or_create_account(conn, user_id, item.account_name)
+                    get_or_create_account(conn, namespace, user_id, item.account_name)
                     if item.account_name
                     else None
                 )
@@ -232,12 +235,12 @@ def record_items(
                 conn.execute(
                     """
                     INSERT INTO expenses
-                        (user_id, expense_date, category_id, account_id,
+                        (namespace, user_id, expense_date, category_id, account_id,
                          tx_type, amount_cents, description, platform, message_id, raw_text, status, ref_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal', ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal', ?)
                     """,
                     (
-                        user_id, item.expense_date.isoformat(), item.category_id, account_id,
+                        namespace, user_id, item.expense_date.isoformat(), item.category_id, account_id,
                         item.tx_type, item.amount_cents, item.description,
                         platform, mid, raw_text, ref_id,
                     ),
@@ -247,25 +250,26 @@ def record_items(
             skipped.append(item)
     today_iso = timeutil.today().isoformat()
     if any(it.expense_date.isoformat() == today_iso for it in saved):
-        _upsert_daily_status(conn, user_id, today_iso, reported=1)
+        _upsert_daily_status(conn, namespace, user_id, today_iso, reported=1)
     conn.commit()
     return saved, skipped
 
 
-def message_already_processed(conn, platform: str, message_id: str) -> bool:
+def message_already_processed(conn, namespace: str, platform: str, message_id: str) -> bool:
     row = conn.execute(
         """
         SELECT id FROM expenses
-        WHERE platform = ? AND (message_id = ? OR message_id LIKE ?)
+        WHERE namespace = ? AND platform = ? AND (message_id = ? OR message_id LIKE ?)
         LIMIT 1
         """,
-        (platform, message_id, f"{message_id}:%"),
+        (namespace, platform, message_id, f"{message_id}:%"),
     ).fetchone()
     return row is not None
 
 
 def find_recent_duplicate(
     conn,
+    namespace: str,
     user_id: str,
     item: ParsedItem,
     window_seconds: int,
@@ -276,8 +280,8 @@ def find_recent_duplicate(
     ).strftime("%Y-%m-%d %H:%M:%S")
     account_row = (
         conn.execute(
-            "SELECT id FROM accounts WHERE user_id = ? AND name = ?",
-            (user_id, item.account_name),
+            "SELECT id FROM accounts WHERE namespace = ? AND user_id = ? AND name = ?",
+            (namespace, user_id, item.account_name),
         ).fetchone()
         if item.account_name
         else None
@@ -285,11 +289,12 @@ def find_recent_duplicate(
     row = conn.execute(
         """
         SELECT id FROM expenses
-        WHERE user_id = ? AND amount_cents = ? AND description = ?
+        WHERE namespace = ? AND user_id = ? AND amount_cents = ? AND description = ?
           AND tx_type = ? AND (account_id IS ?) AND expense_date = ? AND created_at >= ?
         LIMIT 1
         """,
         (
+            namespace,
             user_id,
             item.amount_cents,
             item.description,
@@ -304,14 +309,18 @@ def find_recent_duplicate(
 
 # ---------- 待确认动作 ----------
 
-def get_pending(conn, user_id: str) -> dict | None:
+def get_pending(conn, namespace: str, user_id: str) -> dict | None:
     row = conn.execute(
-        "SELECT * FROM pending_actions WHERE user_id = ?", (user_id,)
+        "SELECT * FROM pending_actions WHERE namespace = ? AND user_id = ?",
+        (namespace, user_id),
     ).fetchone()
     if row is None:
         return None
     if row["expires_at"] <= _now_utc_str():
-        conn.execute("DELETE FROM pending_actions WHERE user_id = ?", (user_id,))
+        conn.execute(
+            "DELETE FROM pending_actions WHERE namespace = ? AND user_id = ?",
+            (namespace, user_id),
+        )
         conn.commit()
         return None
     return dict(row)
@@ -319,6 +328,7 @@ def get_pending(conn, user_id: str) -> dict | None:
 
 def set_pending(
     conn,
+    namespace: str,
     user_id: str,
     action_type: str,
     payload: dict[str, Any],
@@ -330,38 +340,42 @@ def set_pending(
     ).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         """
-        INSERT INTO pending_actions (user_id, action_type, payload, created_at, expires_at)
-        VALUES (?, ?, ?, datetime('now'), ?)
-        ON CONFLICT(user_id) DO UPDATE SET
+        INSERT INTO pending_actions (namespace, user_id, action_type, payload, created_at, expires_at)
+        VALUES (?, ?, ?, ?, datetime('now'), ?)
+        ON CONFLICT(namespace, user_id) DO UPDATE SET
             action_type = excluded.action_type,
             payload = excluded.payload,
             created_at = excluded.created_at,
             expires_at = excluded.expires_at
         """,
-        (user_id, action_type, json.dumps(payload, ensure_ascii=False), expires),
+        (namespace, user_id, action_type, json.dumps(payload, ensure_ascii=False), expires),
     )
     conn.commit()
 
 
-def clear_pending(conn, user_id: str) -> None:
-    conn.execute("DELETE FROM pending_actions WHERE user_id = ?", (user_id,))
+def clear_pending(conn, namespace: str, user_id: str) -> None:
+    conn.execute(
+        "DELETE FROM pending_actions WHERE namespace = ? AND user_id = ?",
+        (namespace, user_id),
+    )
     conn.commit()
 
 
 # ---------- 状态与平账 ----------
 
-def mark_zero(conn, user_id: str) -> None:
-    _upsert_daily_status(conn, user_id, timeutil.iso_today(), zero_confirmed=1)
+def mark_zero(conn, namespace: str, user_id: str) -> None:
+    _upsert_daily_status(conn, namespace, user_id, timeutil.iso_today(), zero_confirmed=1)
     conn.commit()
 
 
-def mark_skipped(conn, user_id: str) -> None:
-    _upsert_daily_status(conn, user_id, timeutil.iso_today(), skipped=1)
+def mark_skipped(conn, namespace: str, user_id: str) -> None:
+    _upsert_daily_status(conn, namespace, user_id, timeutil.iso_today(), skipped=1)
     conn.commit()
 
 
 def create_adjustment(
     conn,
+    namespace: str,
     user_id: str,
     account: str,
     amount_cents: int,
@@ -370,7 +384,6 @@ def create_adjustment(
     message_id: str,
     raw_text: str = "",
 ) -> ParsedItem | None:
-    """平账调整：amount_cents 有符号（正=余额增加，负=余额减少）。"""
     categories = load_categories(conn)
     other = next((c for c in categories if c.name == "其他"), categories[-1])
     item = ParsedItem(
@@ -383,7 +396,7 @@ def create_adjustment(
         amount_cents=amount_cents,
         description=note or "平账",
     )
-    saved, _ = record_items(conn, user_id, [item], platform, message_id, raw_text)
+    saved, _ = record_items(conn, namespace, user_id, [item], platform, message_id, raw_text)
     return saved[0] if saved else None
 
 
@@ -393,15 +406,15 @@ def confirm_payload_items(payload: dict) -> list[ParsedItem]:
 
 # ---------- 撤销 / 修改 ----------
 
-def find_target_record(conn, user_id: str, amount_cents: int | None = None) -> dict | None:
+def find_target_record(conn, namespace: str, user_id: str, amount_cents: int | None = None) -> dict | None:
     q = (
         "SELECT e.*, c.name AS category_name, c.icon AS category_icon, "
         "a.name AS account_name FROM expenses e "
         "JOIN categories c ON c.id = e.category_id "
         "LEFT JOIN accounts a ON a.id = e.account_id "
-        "WHERE e.user_id = ? AND e.status = 'normal'"
+        "WHERE e.namespace = ? AND e.user_id = ? AND e.status = 'normal'"
     )
-    params: list[Any] = [user_id]
+    params: list[Any] = [namespace, user_id]
     if amount_cents is not None:
         q += " AND e.amount_cents = ?"
         params.append(amount_cents)
@@ -410,10 +423,10 @@ def find_target_record(conn, user_id: str, amount_cents: int | None = None) -> d
     return dict(row) if row else None
 
 
-def void_record(conn, user_id: str, record_id: int) -> dict | None:
+def void_record(conn, namespace: str, user_id: str, record_id: int) -> dict | None:
     row = conn.execute(
-        "SELECT * FROM expenses WHERE id = ? AND user_id = ? AND status = 'normal'",
-        (record_id, user_id),
+        "SELECT * FROM expenses WHERE id = ? AND namespace = ? AND user_id = ? AND status = 'normal'",
+        (record_id, namespace, user_id),
     ).fetchone()
     if row is None:
         return None
@@ -424,14 +437,15 @@ def void_record(conn, user_id: str, record_id: int) -> dict | None:
 
 def modify_record(
     conn,
+    namespace: str,
     user_id: str,
     record_id: int,
     new_amount_cents: int,
     new_description: str | None = None,
 ) -> dict | None:
     row = conn.execute(
-        "SELECT * FROM expenses WHERE id = ? AND user_id = ? AND status = 'normal'",
-        (record_id, user_id),
+        "SELECT * FROM expenses WHERE id = ? AND namespace = ? AND user_id = ? AND status = 'normal'",
+        (record_id, namespace, user_id),
     ).fetchone()
     if row is None:
         return None
@@ -453,6 +467,7 @@ def modify_record(
 
 def import_file(
     conn,
+    namespace: str,
     user_id: str,
     platform: str,
     message_id: str,
@@ -461,13 +476,13 @@ def import_file(
 ) -> tuple[ImportResult, list[ParsedItem]]:
     categories = load_categories(conn)
     result, items = parse_import(data, filename, categories)
-    ensure_default_accounts(conn, user_id)
+    ensure_default_accounts(conn, namespace, user_id)
     inserted = 0
     row_errors: list[str] = []
     for idx, item in enumerate(items):
         mid = f"import:{platform}:{message_id}:{idx}"
         account_id = (
-            get_or_create_account(conn, user_id, item.account_name)
+            get_or_create_account(conn, namespace, user_id, item.account_name)
             if item.account_name
             else None
         )
@@ -475,12 +490,12 @@ def import_file(
             conn.execute(
                 """
                 INSERT INTO expenses
-                    (user_id, expense_date, category_id, account_id,
+                    (namespace, user_id, expense_date, category_id, account_id,
                      tx_type, amount_cents, description, platform, message_id, raw_text, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal')
                 """,
                 (
-                    user_id, item.expense_date.isoformat(), item.category_id, account_id,
+                    namespace, user_id, item.expense_date.isoformat(), item.category_id, account_id,
                     item.tx_type, item.amount_cents, item.description,
                     platform, mid, f"导入:{filename}",
                 ),
@@ -491,11 +506,12 @@ def import_file(
     conn.execute(
         """
         INSERT INTO imports
-            (user_id, platform, message_id, filename, file_type,
+            (namespace, user_id, platform, message_id, filename, file_type,
              total_rows, success_rows, failed_rows, errors)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            namespace,
             user_id,
             platform,
             message_id,
@@ -514,12 +530,13 @@ def import_file(
 
 
 def summary_text(
-    conn, user_id: str, items: list[ParsedItem], platform: str, message_id: str, raw_text: str = ""
+    conn, namespace: str, user_id: str, items: list[ParsedItem],
+    platform: str, message_id: str, raw_text: str = "",
 ) -> str:
-    saved, skipped = record_items(conn, user_id, items, platform, message_id, raw_text)
+    saved, skipped = record_items(conn, namespace, user_id, items, platform, message_id, raw_text)
     if not saved:
         return "⚠️ 该消息已记录过，请勿重复发送。"
-    summary = day_summary(conn, user_id, timeutil.today())
+    summary = day_summary(conn, namespace, user_id, timeutil.today())
     lines = [f"✅ 已记录 {len(saved)} 笔："]
     for it in saved:
         tag = {"expense": "支出", "income": "收入", "refund": "退款", "fee": "手续费",
@@ -540,14 +557,18 @@ def summary_text(
 
 def period_stats(
     conn,
+    namespace: str,
     user_id: str,
     start: datetime.date,
     end: datetime.date,
     account_name: str | None = None,
     category_name: str | None = None,
 ) -> dict:
-    where = "e.user_id = ? AND e.status = 'normal' AND e.expense_date BETWEEN ? AND ?"
-    params: list[Any] = [user_id, start.isoformat(), end.isoformat()]
+    where = (
+        "e.namespace = ? AND e.user_id = ? AND e.status = 'normal' "
+        "AND e.expense_date BETWEEN ? AND ?"
+    )
+    params: list[Any] = [namespace, user_id, start.isoformat(), end.isoformat()]
     if account_name:
         where += " AND a.name = ?"
         params.append(account_name)

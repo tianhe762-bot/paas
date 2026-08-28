@@ -25,10 +25,21 @@ class QQBotClient(BaseAdapter):
 
     platform = "qq"
 
-    def __init__(self, api: QQApiClient, handler=None, intents: int = INTENTS_GROUP_AND_C2C) -> None:
+    def __init__(
+        self,
+        api: QQApiClient,
+        handler=None,
+        intents: int = INTENTS_GROUP_AND_C2C,
+        namespace: str = "default",
+        bot_id: str = "default",
+        bot_name: str = "",
+    ) -> None:
         super().__init__()
         self.api = api
         self.intents = intents
+        self.namespace = namespace
+        self.bot_id = bot_id
+        self.bot_name = bot_name
         if handler is not None:
             self.set_message_handler(handler)
         self._task: asyncio.Task | None = None
@@ -220,6 +231,7 @@ class QQBotClient(BaseAdapter):
                 )
             )
         msg = InboundMessage(
+            namespace=self.namespace,
             platform="qq",
             user_id=openid,
             chat_id=openid,

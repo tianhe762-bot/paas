@@ -94,7 +94,7 @@ def build_cases():
             )
             assert row["tx_type"] == "expense"
             assert row["status"] == "normal"
-            acc = s.account_balance_by_name(conn, case_user, a)
+            acc = s.account_balance_by_name(conn, "default", case_user, a)
             assert acc is not None and acc["balance_cents"] == -expected_cents, "余额未同步"
             # 回复真实性：回复里必须包含实际金额
             assert _fmt(expected_cents) + " 元" in replies[0].reply_content, (
@@ -199,7 +199,7 @@ def build_cases():
             assert row is not None
             assert row["tx_type"] == "income"
             assert row["amount_cents"] == expected_cents
-            acc = s.account_balance_by_name(conn, u, account)
+            acc = s.account_balance_by_name(conn, "default", u, account)
             assert acc["balance_cents"] == expected_cents
 
         cases.append(BulkCase("收入", f"收入-{content}", [(mid(), content)], check=check_income))
@@ -231,7 +231,7 @@ def build_cases():
             ).fetchone()
             assert out_row is not None and in_row is not None, f"转账未成对: {content}"
             assert out_row["amount_cents"] == 50000
-            balances = {a["name"]: a["balance_cents"] for a in s.account_balances(conn, u)}
+            balances = {a["name"]: a["balance_cents"] for a in s.account_balances(conn, "default", u)}
             assert balances[f] == -50000
             assert balances[t] == 50000
 
@@ -406,7 +406,7 @@ def build_cases():
             assert row["expense_date"] == expected_date.isoformat(), (
                 f"补记日期错误: {row['expense_date']} != {expected_date}"
             )
-            acc = s.account_balance_by_name(conn, u, account)
+            acc = s.account_balance_by_name(conn, "default", u, account)
             assert acc["balance_cents"] == -2500
 
         cases.append(BulkCase("历史补记", f"补记-{content}", [(mid(), content)], check=check_backfill))
@@ -590,7 +590,7 @@ def _check_delete_past(u, conn, replies):
         "SELECT status FROM expenses WHERE user_id=? ORDER BY id DESC LIMIT 1", (u,)
     ).fetchone()
     assert row["status"] == "voided"
-    assert s.account_balance_by_name(conn, u, "微信")["balance_cents"] == 0
+    assert s.account_balance_by_name(conn, "default", u, "微信")["balance_cents"] == 0
 
 
 def _check_modify(u, conn, replies, new_cents, ask_first=False):
@@ -614,7 +614,7 @@ def _check_transfer_with_fee(u, conn, transfer_cents=50000, fee_cents=30):
     ).fetchall()
     types = {r["tx_type"] for r in rows}
     assert types == {"transfer_out", "transfer_in", "fee"}
-    balances = {a["name"]: a["balance_cents"] for a in s.account_balances(conn, u)}
+    balances = {a["name"]: a["balance_cents"] for a in s.account_balances(conn, "default", u)}
     from_acc = conn.execute(
         "SELECT a.name FROM expenses e JOIN accounts a ON a.id=e.account_id "
         "WHERE e.user_id=? AND e.tx_type='transfer_out' ORDER BY e.id DESC LIMIT 1",
@@ -644,7 +644,7 @@ def _check_report_numbers(u, conn, reply, expense, income):
 
 def _check_initial_balance(u, conn, replies, account, amount):
     assert replies[0].status == "success" and "初始余额" in replies[0].reply_content
-    acc = s.account_balance_by_name(conn, u, account)
+    acc = s.account_balance_by_name(conn, "default", u, account)
     assert acc["balance_cents"] == int(round(float(amount) * 100))
 
 
@@ -668,7 +668,7 @@ def _check_debounce(replies):
 def _check_balance_adjust(u, conn, replies, target_balance):
     assert replies[1].status == "pending_confirmation" and "平账" in replies[1].reply_content
     assert replies[2].status == "success" and "平账" in replies[2].reply_content
-    acc = s.account_balance_by_name(conn, u, "微信")
+    acc = s.account_balance_by_name(conn, "default", u, "微信")
     assert acc["balance_cents"] == target_balance
 
 
@@ -700,7 +700,7 @@ async def run_cases(user_id, cases):
         except Exception as exc:  # noqa: BLE001
             failures.append((case.section, case.label, str(exc), [r.reply_content[:100] for r in replies]))
         finally:
-            s.clear_pending(conn, case_user)
+            s.clear_pending(conn, "default", case_user)
     await router.shutdown()
     conn.close()
     return failures

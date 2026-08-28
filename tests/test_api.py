@@ -214,7 +214,7 @@ async def test_balance_to_flow(client):
     assert "平账" in r2.json()["reply_content"]
 
 
-async def test_admin_login_and_config(client):
+async def test_admin_login_and_bots(client):
     resp = await client.post(
         "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
     )
@@ -223,13 +223,13 @@ async def test_admin_login_and_config(client):
 
     me = await client.get("/admin/api/me")
     assert me.json()["username"] == "admin"
+    assert me.json()["role"] == "admin"
 
-    cfg = await client.get("/admin/api/config/qq")
-    assert cfg.status_code == 200
-
-    put = await client.put(
-        "/admin/api/config/qq",
+    create = await client.post(
+        "/admin/api/bots",
         json={
+            "platform": "qq",
+            "name": "测试QQ机器人",
             "enabled": False,
             "fields": {
                 "app_id": "123456",
@@ -239,20 +239,99 @@ async def test_admin_login_and_config(client):
             },
         },
     )
-    assert put.status_code == 200
+    assert create.status_code == 200
+    bot_id = create.json()["bot_id"]
 
-    got = await client.get("/admin/api/config/qq")
-    fields = got.json()["fields"]
-    assert fields["app_id"] == "123456"
-    assert fields["has_app_secret"] is True
-    assert fields["app_secret"] == ""
+    got = await client.get("/admin/api/bots/" + bot_id)
+    assert got.status_code == 200
+    cfg = got.json()["config"]
+    assert cfg["app_id"] == "123456"
+    assert cfg["has_app_secret"] is True
 
     # 掩码值保存时保留原值
     put2 = await client.put(
-        "/admin/api/config/qq",
-        json={"enabled": False, "fields": {"app_id": "123456", "app_secret": "••••••••"}},
+        "/admin/api/bots/" + bot_id,
+        json={"enabled": False, "name": "改名", "fields": {"app_secret": "••••••••"}},
     )
     assert put2.status_code == 200
+    got2 = await client.get("/admin/api/bots/" + bot_id)
+    assert got2.json()["config"]["has_app_secret"] is True
+
+
+async def test_bot_limit_and_user_role(client):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    # 创建普通用户
+    r = await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    assert r.status_code == 200
+    # 普通用户只能看到自己的机器人
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    me = await client.get("/admin/api/me")
+    assert me.json()["role"] == "user"
+    bots = await client.get("/admin/api/bots")
+    assert bots.json()["bots"] == []
+    # 普通用户无权访问用户管理
+    users = await client.get("/admin/api/users")
+    assert users.status_code == 403
+    # 普通用户创建机器人
+    create = await client.post(
+        "/admin/api/bots",
+        json={"platform": "telegram", "name": "alice的TG", "enabled": False, "fields": {"token": "123:ABC"}},
+    )
+    assert create.status_code == 200
+    # 管理员能看到所有人
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    bots = await client.get("/admin/api/bots")
+    assert len(bots.json()["bots"]) >= 1
+
+
+async def test_multi_bot_data_isolation(client):
+    headers = {"X-Api-Key": "test-api-key"}
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    b1 = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "机器人1", "enabled": False, "fields": {"app_id": "1"}},
+    )).json()["bot_id"]
+    b2 = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "机器人2", "enabled": False, "fields": {"app_id": "2"}},
+    )).json()["bot_id"]
+
+    def inbound(ns, mid, content):
+        return client.post(
+            "/api/v1/message/inbound",
+            headers=headers,
+            json={"namespace": ns, "platform": "qq", "user_id": "u_x", "chat_id": "c_x",
+                  "message_id": mid, "content": content},
+        )
+
+    r1 = await inbound(b1, "iso1", "今天微信吃饭花了25元")
+    r2 = await inbound(b2, "iso2", "今天微信吃饭花了88元")
+    assert r1.json()["status"] == "success"
+    assert r2.json()["status"] == "success"
+
+    # 两个命名空间数据互不可见
+    q1 = await inbound(b1, "iso3", "微信还有多少钱")
+    q2 = await inbound(b2, "iso4", "微信还有多少钱")
+    assert "-25.00" in q1.json()["reply_content"]
+    assert "-88.00" in q2.json()["reply_content"]
+
+    # 删除机器人2 → 其数据一并清除
+    d = await client.delete("/admin/api/bots/" + b2)
+    assert d.status_code == 200
+    q2b = await inbound(b2, "iso5", "微信还有多少钱")
+    assert "还没有账户数据" in q2b.json()["reply_content"]
 
 
 async def test_admin_settings_and_template(client):

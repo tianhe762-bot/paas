@@ -26,6 +26,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 class InboundPayload(BaseModel):
+    namespace: str = "default"
     platform: str
     user_id: str
     chat_id: str | None = None
@@ -85,6 +86,7 @@ def healthz() -> dict:
 @app.post("/api/v1/message/inbound", dependencies=[Depends(_check_api_key)])
 async def message_inbound(payload: InboundPayload) -> dict:
     msg = InboundMessage(
+        namespace=payload.namespace,
         platform=payload.platform.lower(),
         user_id=payload.user_id,
         chat_id=payload.chat_id or payload.user_id,

@@ -67,20 +67,16 @@ class SchedulerManager:
             message = settings_store.get_setting(
                 conn, "reminder_message", "📝 今天的消费记录了吗？"
             ) or "📝 今天的消费记录了吗？"
-            platforms = [
-                r["platform"]
-                for r in conn.execute(
-                    "SELECT platform FROM bot_configs WHERE enabled = 1"
-                ).fetchall()
-            ]
-            for platform in platforms:
+            bots = conn.execute(
+                "SELECT platform, bot_id, config_enc FROM bot_configs WHERE enabled = 1"
+            ).fetchall()
+            for bot in bots:
+                platform = bot["platform"]
+                bot_id = bot["bot_id"]
                 cfg = {}
-                row = conn.execute(
-                    "SELECT config_enc FROM bot_configs WHERE platform = ?", (platform,)
-                ).fetchone()
-                if row and row["config_enc"]:
+                if bot["config_enc"]:
                     try:
-                        cfg = decrypt_json(row["config_enc"])
+                        cfg = decrypt_json(bot["config_enc"])
                     except Exception:  # noqa: BLE001
                         continue
                 users = [
@@ -88,36 +84,37 @@ class SchedulerManager:
                     for r in conn.execute(
                         """
                         SELECT DISTINCT user_id FROM user_chats
-                        WHERE platform = ? AND last_seen_at >= datetime('now', '-30 days')
+                        WHERE namespace = ? AND platform = ?
+                          AND last_seen_at >= datetime('now', '-30 days')
                         """,
-                        (platform,),
+                        (bot_id, platform),
                     ).fetchall()
                 ]
                 for user_id in users:
                     status = conn.execute(
                         """
                         SELECT reported, zero_confirmed, skipped FROM daily_status
-                        WHERE user_id = ? AND status_date = ?
+                        WHERE namespace = ? AND user_id = ? AND status_date = ?
                         """,
-                        (user_id, today_iso),
+                        (bot_id, user_id, today_iso),
                     ).fetchone()
                     if status and (
                         status["reported"] or status["zero_confirmed"] or status["skipped"]
                     ):
                         continue
-                    chat_id = last_chat(conn, user_id, platform) or cfg.get("default_chat_id")
+                    chat_id = last_chat(conn, bot_id, user_id, platform) or cfg.get("default_chat_id")
                     if not chat_id:
                         continue
-                    ok = await self.adapter_manager.send(platform, chat_id, message)
-                    log.info("提醒 %s -> %s (%s): %s", platform, user_id, chat_id, ok)
+                    ok = await self.adapter_manager.send(platform, bot_id, chat_id, message)
+                    log.info("提醒 %s/%s -> %s (%s): %s", platform, bot_id, user_id, chat_id, ok)
                     conn.execute(
                         """
-                        INSERT INTO daily_status (user_id, status_date, reminder_count)
-                        VALUES (?, ?, 1)
-                        ON CONFLICT(user_id, status_date)
+                        INSERT INTO daily_status (namespace, user_id, status_date, reminder_count)
+                        VALUES (?, ?, ?, 1)
+                        ON CONFLICT(namespace, user_id, status_date)
                         DO UPDATE SET reminder_count = reminder_count + 1
                         """,
-                        (user_id, today_iso),
+                        (bot_id, user_id, today_iso),
                     )
             conn.commit()
         finally:
@@ -132,4 +129,3 @@ class SchedulerManager:
             log.info("热备份完成: %s，清理 %s 个旧备份", target, removed)
         finally:
             conn.close()
-

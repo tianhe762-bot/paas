@@ -10,6 +10,9 @@ class BaseAdapter(ABC):
     platform: str = ""
 
     def __init__(self) -> None:
+        self.namespace = "default"
+        self.bot_id = "default"
+        self.bot_name = ""
         self._handler: MessageHandler | None = None
         self._running = False
         self.last_error = ""
@@ -35,4 +38,3 @@ class BaseAdapter(ABC):
 
     @abstractmethod
     async def test(self) -> tuple[bool, str]: ...
-

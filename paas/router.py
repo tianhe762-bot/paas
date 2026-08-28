@@ -61,8 +61,8 @@ class Router:
     async def handle(self, msg: InboundMessage) -> Reply:
         conn = connect()
         try:
-            touch_chat(conn, msg.user_id, msg.platform, msg.chat_id)
-            s.save_raw_message(conn, msg.platform, msg.message_id, msg.user_id, msg.content)
+            touch_chat(conn, msg.namespace, msg.user_id, msg.platform, msg.chat_id)
+            s.save_raw_message(conn, msg.namespace, msg.platform, msg.message_id, msg.user_id, msg.content)
 
             file_attach = self._pick_import_attachment(msg)
             if file_attach is not None:
@@ -72,12 +72,12 @@ class Router:
             if not content:
                 return Reply(status="unrecognized", reply_content="收到空消息，请发送消费明细。")
 
-            pending = s.get_pending(conn, msg.user_id)
+            pending = s.get_pending(conn, msg.namespace, msg.user_id)
             if pending is not None:
                 return await self._handle_pending(conn, msg, pending, content)
 
             # 防重：同一消息 ID 重发直接拒绝，与 30 秒防抖是两套独立机制
-            if s.message_already_processed(conn, msg.platform, msg.message_id):
+            if s.message_already_processed(conn, msg.namespace, msg.platform, msg.message_id):
                 return Reply(status="duplicate", reply_content="⚠️ 该消息已记录过，请勿重复发送。")
 
             if DELETE_RE.search(content):
@@ -89,22 +89,22 @@ class Router:
 
             m = SET_BALANCE_RE.search(content)
             if m:
-                return self._handle_set_balance(conn, msg.user_id, m.group(1), m.group(2))
+                return self._handle_set_balance(conn, msg.namespace, msg.user_id, m.group(1), m.group(2))
 
             if self._is_query(content):
                 return await self._handle_query(conn, msg, content)
 
             if content.startswith("导出"):
-                return await self._handle_export(conn, msg.user_id)
+                return await self._handle_export(conn, msg.namespace, msg.user_id)
 
             if content in {"帮助", "help", "命令", "菜单", "?", "？"}:
                 return Reply(status="success", reply_content=HELP_TEXT)
 
             if content in s.ZERO_PHRASES:
-                s.mark_zero(conn, msg.user_id)
+                s.mark_zero(conn, msg.namespace, msg.user_id)
                 return Reply(status="success", reply_content="✅ 已确认今日无消费，无需记账。")
             if content in s.SKIP_PHRASES:
-                s.mark_skipped(conn, msg.user_id)
+                s.mark_skipped(conn, msg.namespace, msg.user_id)
                 return Reply(status="success", reply_content="👌 已跳过今日记账。")
 
             return await self._record(conn, msg, content)
@@ -148,7 +148,7 @@ class Router:
     ) -> Reply:
         action = pending["action_type"]
         if content in s.CANCEL_PHRASES:
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             return Reply(status="cancelled", reply_content="👌 已取消。")
 
         if action == "DUPLICATE_CONFIRM":
@@ -158,14 +158,14 @@ class Router:
                     reply_content="请先回复【是】确认，或【否】取消。",
                     requires_confirmation=True,
                 )
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             items = s.confirm_payload_items(json.loads(pending["payload"]))
             return self._record_final(conn, msg, items, pending.get("raw_text", ""), skip_debounce=True)
 
         if action == "DELETE_CONFIRM" and content in s.CONFIRM_PHRASES:
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             payload = json.loads(pending["payload"])
-            row = s.void_record(conn, msg.user_id, payload["record_id"])
+            row = s.void_record(conn, msg.namespace, msg.user_id, payload["record_id"])
             if row is None:
                 return Reply(status="error", reply_content="⚠️ 该记录不存在或已撤销。")
             return Reply(
@@ -178,10 +178,10 @@ class Router:
             )
 
         if action == "MODIFY_CONFIRM" and content in s.CONFIRM_PHRASES:
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             payload = json.loads(pending["payload"])
             row = s.modify_record(
-                conn, msg.user_id, payload["record_id"], payload["new_amount_cents"]
+                conn, msg.namespace, msg.user_id, payload["record_id"], payload["new_amount_cents"]
             )
             if row is None:
                 return Reply(status="error", reply_content="⚠️ 该记录不存在或已撤销。")
@@ -202,9 +202,9 @@ class Router:
                     reply_content="请直接回复新金额，例如：35",
                     requires_confirmation=True,
                 )
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             payload = json.loads(pending["payload"])
-            row = s.modify_record(conn, msg.user_id, payload["record_id"], new_cents)
+            row = s.modify_record(conn, msg.namespace, msg.user_id, payload["record_id"], new_cents)
             if row is None:
                 return Reply(status="error", reply_content="⚠️ 该记录不存在或已撤销。")
             return Reply(
@@ -216,10 +216,11 @@ class Router:
             )
 
         if action == "BALANCE_CONFIRM" and content in s.CONFIRM_PHRASES:
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             payload = json.loads(pending["payload"])
             item = s.create_adjustment(
                 conn,
+                msg.namespace,
                 msg.user_id,
                 payload["account"],
                 payload["amount_cents"],
@@ -241,7 +242,7 @@ class Router:
             )
 
         if action == "ASK_ACCOUNT":
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             items = s.confirm_payload_items(json.loads(pending["payload"]))
             account = content
             for it in items:
@@ -250,7 +251,7 @@ class Router:
             return self._draft_next(conn, msg, items, pending)
 
         if action == "ASK_TRANSFER_TO":
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             items = s.confirm_payload_items(json.loads(pending["payload"]))
             for it in items:
                 if it.tx_type == "transfer_out":
@@ -258,13 +259,13 @@ class Router:
             return self._draft_next(conn, msg, items, pending)
 
         if action == "ASK_TIME":
-            s.clear_pending(conn, msg.user_id)
+            s.clear_pending(conn, msg.namespace, msg.user_id)
             items = s.confirm_payload_items(json.loads(pending["payload"]))
             day = self._parse_answer_date(content)
             if day is None:
                 ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
                 s.set_pending(
-                    conn, msg.user_id, "ASK_TIME",
+                    conn, msg.namespace, msg.user_id, "ASK_TIME",
                     {"items": [it.model_dump(mode="json") for it in items], "raw_text": pending.get("raw_text", "")},
                     ttl,
                 )
@@ -298,7 +299,7 @@ class Router:
         if any(it.tx_type == "transfer_out" and not it.to_account_name for it in items):
             ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
             s.set_pending(
-                conn, msg.user_id, "ASK_TRANSFER_TO",
+                conn, msg.namespace, msg.user_id, "ASK_TRANSFER_TO",
                 {"items": [it.model_dump(mode="json") for it in items], "raw_text": raw_text}, ttl,
             )
             return Reply(
@@ -309,7 +310,7 @@ class Router:
         if any(not it.account_name for it in items if it.tx_type != "transfer_out"):
             ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
             s.set_pending(
-                conn, msg.user_id, "ASK_ACCOUNT",
+                conn, msg.namespace, msg.user_id, "ASK_ACCOUNT",
                 {"items": [it.model_dump(mode="json") for it in items], "raw_text": raw_text}, ttl,
             )
             return Reply(
@@ -320,7 +321,7 @@ class Router:
         if not has_time_expression(raw_text):
             ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
             s.set_pending(
-                conn, msg.user_id, "ASK_TIME",
+                conn, msg.namespace, msg.user_id, "ASK_TIME",
                 {"items": [it.model_dump(mode="json") for it in items], "raw_text": raw_text}, ttl,
             )
             return Reply(
@@ -351,7 +352,7 @@ class Router:
                 (
                     it
                     for it in items
-                    if s.find_recent_duplicate(conn, msg.user_id, it, window)
+                    if s.find_recent_duplicate(conn, msg.namespace, msg.user_id, it, window)
                 ),
                 None,
             )
@@ -359,6 +360,7 @@ class Router:
                 ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
                 s.set_pending(
                     conn,
+                    msg.namespace,
                     msg.user_id,
                     "DUPLICATE_CONFIRM",
                     {
@@ -379,7 +381,7 @@ class Router:
         return Reply(
             status="success",
             reply_content=s.summary_text(
-                conn, msg.user_id, items, msg.platform, msg.message_id, raw_text
+                conn, msg.namespace, msg.user_id, items, msg.platform, msg.message_id, raw_text
             ),
             parsed_count=len(items),
         )
@@ -388,12 +390,12 @@ class Router:
 
     async def _handle_delete(self, conn, msg: InboundMessage, content: str) -> Reply:
         amount_cents = parse_amount_with_unit(content)
-        row = s.find_target_record(conn, msg.user_id, amount_cents)
+        row = s.find_target_record(conn, msg.namespace, msg.user_id, amount_cents)
         if row is None:
             return Reply(status="error", reply_content="没有找到可撤销的记录。")
         ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
         s.set_pending(
-            conn, msg.user_id, "DELETE_CONFIRM",
+            conn, msg.namespace, msg.user_id, "DELETE_CONFIRM",
             {"record_id": row["id"], "raw_text": content}, ttl,
         )
         acc = f"（{row['account_name']}）" if row.get("account_name") else ""
@@ -408,13 +410,13 @@ class Router:
 
     async def _handle_modify(self, conn, msg: InboundMessage, content: str) -> Reply:
         parsed = parse_modify_request(content)
-        target = s.find_target_record(conn, msg.user_id, parsed["old_cents"])
+        target = s.find_target_record(conn, msg.namespace, msg.user_id, parsed["old_cents"])
         if target is None:
             return Reply(status="error", reply_content="没有找到要修改的记录。")
         if parsed["new_cents"] is None:
             ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
             s.set_pending(
-                conn, msg.user_id, "MODIFY_AMOUNT",
+                conn, msg.namespace, msg.user_id, "MODIFY_AMOUNT",
                 {"record_id": target["id"], "raw_text": content}, ttl,
             )
             return Reply(
@@ -427,7 +429,7 @@ class Router:
             )
         ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
         s.set_pending(
-            conn, msg.user_id, "MODIFY_CONFIRM",
+            conn, msg.namespace, msg.user_id, "MODIFY_CONFIRM",
             {
                 "record_id": target["id"],
                 "new_amount_cents": parsed["new_cents"],
@@ -457,7 +459,7 @@ class Router:
                     status="unrecognized",
                     reply_content="请说明账户，例如：微信平账到90元",
                 )
-            acc = s.account_balance_by_name(conn, msg.user_id, parsed["account"])
+            acc = s.account_balance_by_name(conn, msg.namespace, msg.user_id, parsed["account"])
             current = acc["balance_cents"] if acc else 0
             adjustment = parsed["amount_cents"] - current
             if adjustment == 0:
@@ -468,14 +470,14 @@ class Router:
         else:
             adjustment = parsed["amount_cents"]
             acc = (
-                s.account_balance_by_name(conn, msg.user_id, parsed["account"])
+                s.account_balance_by_name(conn, msg.namespace, msg.user_id, parsed["account"])
                 if parsed["account"]
                 else None
             )
             current = acc["balance_cents"] if acc else None
         ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
         s.set_pending(
-            conn, msg.user_id, "BALANCE_CONFIRM",
+            conn, msg.namespace, msg.user_id, "BALANCE_CONFIRM",
             {
                 "account": parsed["account"],
                 "amount_cents": adjustment,
@@ -495,7 +497,7 @@ class Router:
             requires_confirmation=True,
         )
 
-    def _handle_set_balance(self, conn, user_id: str, account: str, raw_amount: str) -> Reply:
+    def _handle_set_balance(self, conn, namespace: str, user_id: str, account: str, raw_amount: str) -> Reply:
         amount = float(raw_amount) if re.fullmatch(r"\d+(\.\d+)?", raw_amount) else None
         if amount is None:
             from paas.modules.account.parser import parse_chinese_number
@@ -503,8 +505,8 @@ class Router:
             amount = parse_chinese_number(raw_amount)
         if not amount or amount < 0:
             return Reply(status="unrecognized", reply_content="余额格式：设置微信余额1000")
-        s.set_account_initial_balance(conn, user_id, account, yuan_to_cents(amount))
-        acc = s.account_balance_by_name(conn, user_id, account)
+        s.set_account_initial_balance(conn, namespace, user_id, account, yuan_to_cents(amount))
+        acc = s.account_balance_by_name(conn, namespace, user_id, account)
         return Reply(
             status="success",
             reply_content=(
@@ -521,9 +523,9 @@ class Router:
         if ("余额" in content or ("还有" in content and "多少" in content)) and (
             accounts_in_text or "总资产" in content
         ):
-            return self._balance_reply(conn, msg.user_id, accounts_in_text[0] if accounts_in_text else None)
+            return self._balance_reply(conn, msg.namespace, msg.user_id, accounts_in_text[0] if accounts_in_text else None)
         if "总资产" in content or "所有账户" in content or (accounts_in_text and "资产" in content):
-            return self._balance_reply(conn, msg.user_id, None)
+            return self._balance_reply(conn, msg.namespace, msg.user_id, None)
 
         # 时间段统计
         today = timeutil.today()
@@ -538,7 +540,7 @@ class Router:
                 category_name = cat.name
                 break
         stats = s.period_stats(
-            conn, msg.user_id, start, end, account_name=account_name, category_name=category_name
+            conn, msg.namespace, msg.user_id, start, end, account_name=account_name, category_name=category_name
         )
         lines = [
             f"📊 {start.isoformat()} ~ {end.isoformat()}："
@@ -561,7 +563,8 @@ class Router:
             lines.append(f"（仅统计 {category_name} 分类）")
         if "详细" in content or "详情" in content:
             rows = period_detail(
-                conn, msg.user_id, start, end, account_name=account_name, category_name=category_name
+                conn, msg.namespace, msg.user_id, start, end,
+                account_name=account_name, category_name=category_name,
             )
             if rows:
                 lines.append("明细：")
@@ -575,8 +578,8 @@ class Router:
                     )
         return Reply(status="success", reply_content="\n".join(lines))
 
-    def _balance_reply(self, conn, user_id: str, account: str | None) -> Reply:
-        balances = s.account_balances(conn, user_id)
+    def _balance_reply(self, conn, namespace: str, user_id: str, account: str | None) -> Reply:
+        balances = s.account_balances(conn, namespace, user_id)
         if not balances:
             return Reply(status="error", reply_content="还没有账户数据，先记账一笔试试。")
         if account:
@@ -593,17 +596,17 @@ class Router:
         lines.append(f"总资产：{s.format_signed_money(sum(a['balance_cents'] for a in balances))} 元")
         return Reply(status="success", reply_content="\n".join(lines))
 
-    async def _handle_export(self, conn, user_id: str) -> Reply:
+    async def _handle_export(self, conn, namespace: str, user_id: str) -> Reply:
         rows = conn.execute(
             """
             SELECT e.expense_date, e.tx_type, c.name AS category_name, e.amount_cents,
                    a.name AS account_name, e.description, e.status
             FROM expenses e JOIN categories c ON c.id = e.category_id
             LEFT JOIN accounts a ON a.id = e.account_id
-            WHERE e.user_id = ?
+            WHERE e.namespace = ? AND e.user_id = ?
             ORDER BY e.expense_date DESC, e.id DESC
             """,
-            (user_id,),
+            (namespace, user_id),
         ).fetchall()
         total = len(rows)
         normal = sum(1 for r in rows if r["status"] == "normal")
@@ -643,6 +646,7 @@ class Router:
             return Reply(status="error", reply_content="⚠️ 未获取到文件内容。")
         result, _ = s.import_file(
             conn,
+            msg.namespace,
             msg.user_id,
             msg.platform,
             msg.message_id,

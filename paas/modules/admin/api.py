@@ -1,3 +1,4 @@
+import csv as csv_mod
 import io
 from typing import Any
 
@@ -21,9 +22,17 @@ class PasswordBody(BaseModel):
     new_password: str
 
 
-class ConfigBody(BaseModel):
+class BotBody(BaseModel):
+    platform: str
+    name: str = ""
     enabled: bool = False
     fields: dict[str, Any] = {}
+
+
+class BotUpdateBody(BaseModel):
+    enabled: bool | None = None
+    name: str | None = None
+    fields: dict[str, Any] | None = None
 
 
 class TestBody(BaseModel):
@@ -34,10 +43,37 @@ class SettingsBody(BaseModel):
     updates: dict[str, Any] = {}
 
 
-def _require_session(request: Request) -> None:
+class UserBody(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+
+def _require_session(request: Request) -> str:
     token = request.cookies.get("paas_session")
     if not admin_service.check_session(token):
         raise HTTPException(status_code=401, detail="未登录或会话已过期")
+    return token
+
+
+def _require_admin(request: Request) -> str:
+    token = _require_session(request)
+    if not admin_service.is_admin(token):
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return token
+
+
+def _viewer(request: Request) -> tuple[int, bool]:
+    token = _require_session(request)
+    info = admin_service.session_info(token)
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT id, role FROM admin_users WHERE username = ?", (info["username"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["id"], row["role"] == "admin"
 
 
 def _state(request: Request):
@@ -49,7 +85,8 @@ def login(body: LoginBody) -> Response:
     token = admin_service.login(body.username.strip(), body.password)
     if token is None:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    resp = JSONResponse({"ok": True, "username": body.username.strip()})
+    info = admin_service.session_info(token)
+    resp = JSONResponse({"ok": True, "username": body.username.strip(), "role": info["role"]})
     resp.set_cookie(
         "paas_session",
         token,
@@ -68,10 +105,141 @@ def logout(request: Request) -> dict:
 
 @router.get("/me")
 def me(request: Request) -> dict:
-    _require_session(request)
-    token = request.cookies.get("paas_session")
-    return {"username": admin_service.SESSIONS.get(token or "", {}).get("username", "")}
+    token = _require_session(request)
+    info = admin_service.session_info(token)
+    return {"username": info["username"], "role": info["role"]}
 
+
+# ---------- 机器人 ----------
+
+@router.get("/bots")
+def list_bots(request: Request) -> dict:
+    viewer_id, admin = _viewer(request)
+    conn = connect()
+    try:
+        return {"bots": admin_service.list_bots(conn, viewer_id, admin), "max_per_platform": admin_service.MAX_BOTS_PER_PLATFORM}
+    finally:
+        conn.close()
+
+
+@router.post("/bots")
+async def create_bot(request: Request, body: BotBody) -> dict:
+    viewer_id, admin = _viewer(request)
+    conn = connect()
+    try:
+        ok, msg = admin_service.create_bot(conn, viewer_id, body.platform, body.name, body.fields, body.enabled)
+        if not ok:
+            raise HTTPException(status_code=400, detail=msg)
+        await _state(request).manager.apply_configs(conn)
+    finally:
+        conn.close()
+    return {"ok": True, "bot_id": msg}
+
+
+@router.get("/bots/{bot_id}")
+def get_bot(request: Request, bot_id: str) -> dict:
+    viewer_id, admin = _viewer(request)
+    conn = connect()
+    try:
+        bot = admin_service.get_bot(conn, bot_id)
+        if bot is None:
+            raise HTTPException(status_code=404, detail="机器人不存在")
+        if not admin and bot["owner_id"] != viewer_id:
+            raise HTTPException(status_code=403, detail="无权访问该机器人")
+        return bot
+    finally:
+        conn.close()
+
+
+@router.put("/bots/{bot_id}")
+async def update_bot(request: Request, bot_id: str, body: BotUpdateBody) -> dict:
+    viewer_id, admin = _viewer(request)
+    conn = connect()
+    try:
+        bot = admin_service.get_bot(conn, bot_id)
+        if bot is None:
+            raise HTTPException(status_code=404, detail="机器人不存在")
+        if not admin and bot["owner_id"] != viewer_id:
+            raise HTTPException(status_code=403, detail="无权修改该机器人")
+        if not admin_service.update_bot(conn, bot_id, fields=body.fields, enabled=body.enabled, name=body.name):
+            raise HTTPException(status_code=404, detail="机器人不存在")
+        await _state(request).manager.apply_configs(conn)
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@router.delete("/bots/{bot_id}")
+async def delete_bot(request: Request, bot_id: str) -> dict:
+    viewer_id, admin = _viewer(request)
+    conn = connect()
+    try:
+        bot = admin_service.get_bot(conn, bot_id)
+        if bot is None:
+            raise HTTPException(status_code=404, detail="机器人不存在")
+        if not admin and bot["owner_id"] != viewer_id:
+            raise HTTPException(status_code=403, detail="无权删除该机器人")
+        if not admin_service.delete_bot(conn, bot_id):
+            raise HTTPException(status_code=404, detail="机器人不存在")
+        await _state(request).manager.apply_configs(conn)
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@router.post("/bots/{bot_id}/test")
+async def test_bot(request: Request, bot_id: str, body: TestBody) -> dict:
+    _require_session(request)
+    conn = connect()
+    try:
+        bot = admin_service.get_bot(conn, bot_id)
+        if bot is None:
+            raise HTTPException(status_code=404, detail="机器人不存在")
+    finally:
+        conn.close()
+    ok, msg = await admin_service.test_config(bot["platform"], body.fields, bot_id=bot_id)
+    return {"ok": ok, "message": msg}
+
+
+# ---------- 用户管理（仅管理员） ----------
+
+@router.get("/users")
+def list_users(request: Request) -> dict:
+    _require_admin(request)
+    conn = connect()
+    try:
+        return {"users": admin_service.list_users(conn)}
+    finally:
+        conn.close()
+
+
+@router.post("/users")
+def create_user(request: Request, body: UserBody) -> dict:
+    _require_admin(request)
+    conn = connect()
+    try:
+        ok, msg = admin_service.create_user(conn, body.username, body.password, body.role)
+        if not ok:
+            raise HTTPException(status_code=400, detail=msg)
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@router.delete("/users/{user_id}")
+def delete_user(request: Request, user_id: int) -> dict:
+    _require_admin(request)
+    conn = connect()
+    try:
+        ok, msg = admin_service.delete_user(conn, user_id)
+        if not ok:
+            raise HTTPException(status_code=400, detail=msg)
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+# ---------- 状态 / 设置 / 备份 / 导入导出 ----------
 
 @router.get("/status")
 def status(request: Request) -> dict:
@@ -81,47 +249,16 @@ def status(request: Request) -> dict:
     try:
         expense_count = conn.execute("SELECT COUNT(*) AS n FROM expenses").fetchone()
         import_count = conn.execute("SELECT COUNT(*) AS n FROM imports").fetchone()
+        bot_count = conn.execute("SELECT COUNT(*) AS n FROM bot_configs").fetchone()
     finally:
         conn.close()
     return {
         "adapters": state.manager.status(),
         "expenses": expense_count["n"],
         "imports": import_count["n"],
+        "bots": bot_count["n"],
         "scheduler_running": getattr(state.scheduler, "running", False),
     }
-
-
-@router.get("/config/{platform}")
-def get_config(request: Request, platform: str) -> dict:
-    _require_session(request)
-    conn = connect()
-    try:
-        return admin_service.get_config(conn, platform)
-    finally:
-        conn.close()
-
-
-@router.put("/config/{platform}")
-async def put_config(request: Request, platform: str, body: ConfigBody) -> dict:
-    _require_session(request)
-    if platform not in admin_service.CONFIG_DEFAULTS:
-        raise HTTPException(status_code=400, detail="未知平台")
-    conn = connect()
-    try:
-        admin_service.set_config(conn, platform, body.fields, body.enabled)
-        await _state(request).manager.apply_configs(conn)
-    finally:
-        conn.close()
-    return {"ok": True}
-
-
-@router.post("/config/{platform}/test")
-async def test_config(request: Request, platform: str, body: TestBody) -> dict:
-    _require_session(request)
-    if platform not in admin_service.CONFIG_DEFAULTS:
-        raise HTTPException(status_code=400, detail="未知平台")
-    ok, msg = await admin_service.test_config(platform, body.fields)
-    return {"ok": ok, "message": msg}
 
 
 @router.get("/settings")
@@ -152,7 +289,7 @@ def put_settings(request: Request, body: SettingsBody) -> dict:
 def change_password(request: Request, body: PasswordBody) -> dict:
     _require_session(request)
     token = request.cookies.get("paas_session")
-    username = admin_service.SESSIONS.get(token or "", {}).get("username", "")
+    username = admin_service.session_info(token)["username"]
     ok, msg = admin_service.change_password(username, body.old_password, body.new_password)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
@@ -199,6 +336,7 @@ def import_template(request: Request) -> Response:
 def export_ledger(
     request: Request,
     user_id: str,
+    namespace: str = "default",
     format: str = "csv",
     start: str | None = None,
     end: str | None = None,
@@ -206,8 +344,8 @@ def export_ledger(
     _require_session(request)
     conn = connect()
     try:
-        where = "WHERE e.user_id = ?"
-        params: list[Any] = [user_id]
+        where = "WHERE e.namespace = ? AND e.user_id = ?"
+        params: list[Any] = [namespace, user_id]
         if start:
             where += " AND e.expense_date >= ?"
             params.append(start)
@@ -255,8 +393,6 @@ def export_ledger(
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 headers={"Content-Disposition": 'attachment; filename="paas_ledger.xlsx"'},
             )
-        import csv as csv_mod
-
         buf = io.StringIO()
         writer = csv_mod.writer(buf)
         writer.writerow(headers)
@@ -275,3 +411,4 @@ def export_ledger(
         )
     finally:
         conn.close()
+

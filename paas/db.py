@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS categories (
 
 CREATE TABLE IF NOT EXISTS expenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL DEFAULT 'default',
     user_id TEXT NOT NULL,
     expense_date TEXT NOT NULL,
     category_id INTEGER NOT NULL,
@@ -33,36 +34,40 @@ CREATE TABLE IF NOT EXISTS expenses (
     FOREIGN KEY (category_id) REFERENCES categories(id)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_msg ON expenses (platform, message_id);
-CREATE INDEX IF NOT EXISTS idx_expense_query ON expenses (user_id, expense_date);
-CREATE INDEX IF NOT EXISTS idx_expense_created ON expenses (user_id, created_at);
-
 CREATE TABLE IF NOT EXISTS daily_status (
+    namespace TEXT NOT NULL DEFAULT 'default',
     user_id TEXT NOT NULL,
     status_date TEXT NOT NULL,
     reported INTEGER DEFAULT 0,
     zero_confirmed INTEGER DEFAULT 0,
     skipped INTEGER DEFAULT 0,
     reminder_count INTEGER DEFAULT 0,
-    PRIMARY KEY (user_id, status_date)
+    PRIMARY KEY (namespace, user_id, status_date)
 );
 
 CREATE TABLE IF NOT EXISTS pending_actions (
-    user_id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    user_id TEXT NOT NULL,
     action_type TEXT NOT NULL,
     payload TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now')),
-    expires_at TEXT NOT NULL
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (namespace, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS bot_configs (
-    platform TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    bot_id TEXT NOT NULL,
+    owner_id INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL DEFAULT '',
     enabled INTEGER DEFAULT 0,
     config_enc TEXT NOT NULL DEFAULT '',
     status TEXT DEFAULT 'stopped',
     last_error TEXT DEFAULT '',
     last_message_at TEXT DEFAULT '',
-    updated_at TEXT DEFAULT (datetime('now'))
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(platform, bot_id)
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -74,19 +79,22 @@ CREATE TABLE IF NOT EXISTS admin_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'admin',
     created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS user_chats (
+    namespace TEXT NOT NULL DEFAULT 'default',
     user_id TEXT NOT NULL,
     platform TEXT NOT NULL,
     chat_id TEXT NOT NULL,
     last_seen_at TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (user_id, platform, chat_id)
+    PRIMARY KEY (namespace, user_id, platform, chat_id)
 );
 
 CREATE TABLE IF NOT EXISTS imports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL DEFAULT 'default',
     user_id TEXT NOT NULL,
     platform TEXT NOT NULL,
     message_id TEXT NOT NULL,
@@ -101,22 +109,24 @@ CREATE TABLE IF NOT EXISTS imports (
 
 CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL DEFAULT 'default',
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     initial_balance_cents INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(user_id, name)
+    UNIQUE(namespace, user_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS raw_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL DEFAULT 'default',
     platform TEXT NOT NULL,
     message_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now')),
-    UNIQUE(platform, message_id)
+    UNIQUE(namespace, platform, message_id)
 );
 """
 
@@ -167,7 +177,7 @@ def _column_names(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def migrate_db(conn: sqlite3.Connection) -> None:
-    """从 v1（entry_type）平滑迁移到 v2（账户/类型/状态/原始消息）。"""
+    """从 v1/v2 平滑迁移到 v3（多机器人命名空间 + 用户角色）。"""
     cols = _column_names(conn, "expenses")
     if "entry_type" in cols and "tx_type" not in cols:
         conn.execute("ALTER TABLE expenses RENAME COLUMN entry_type TO tx_type")
@@ -184,9 +194,166 @@ def migrate_db(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE expenses ADD COLUMN {name} {ddl}")
     conn.execute("UPDATE expenses SET tx_type='expense' WHERE tx_type IS NULL OR tx_type=''")
     conn.execute("UPDATE expenses SET status='normal' WHERE status IS NULL")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_expense_status ON expenses (user_id, status)")
-    conn.execute("PRAGMA user_version = 2")
+    _migrate_v3(conn)
     conn.commit()
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    # 用户角色
+    if "role" not in _column_names(conn, "admin_users"):
+        conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+
+    # 流水表：命名空间列 + 唯一索引
+    if "namespace" not in _column_names(conn, "expenses"):
+        conn.execute("ALTER TABLE expenses ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'")
+    conn.execute("DROP INDEX IF EXISTS uq_platform_msg")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_ns_platform_msg ON expenses (namespace, platform, message_id)")
+    conn.execute("DROP INDEX IF EXISTS idx_expense_query")
+    conn.execute("DROP INDEX IF EXISTS idx_expense_created")
+    conn.execute("DROP INDEX IF EXISTS idx_expense_status")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_expense_query ON expenses (namespace, user_id, expense_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_expense_created ON expenses (namespace, user_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_expense_status ON expenses (namespace, user_id, status)")
+
+    # 需要重建主键/唯一约束的表
+    _rebuild_table(
+        conn, "daily_status",
+        """
+        CREATE TABLE daily_status (
+            namespace TEXT NOT NULL DEFAULT 'default',
+            user_id TEXT NOT NULL,
+            status_date TEXT NOT NULL,
+            reported INTEGER DEFAULT 0,
+            zero_confirmed INTEGER DEFAULT 0,
+            skipped INTEGER DEFAULT 0,
+            reminder_count INTEGER DEFAULT 0,
+            PRIMARY KEY (namespace, user_id, status_date)
+        )
+        """,
+        "namespace, user_id, status_date, reported, zero_confirmed, skipped, reminder_count",
+        "user_id, status_date, reported, zero_confirmed, skipped, reminder_count",
+        "default",
+    )
+    _rebuild_table(
+        conn, "pending_actions",
+        """
+        CREATE TABLE pending_actions (
+            namespace TEXT NOT NULL DEFAULT 'default',
+            user_id TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (namespace, user_id)
+        )
+        """,
+        "namespace, user_id, action_type, payload, created_at, expires_at",
+        "user_id, action_type, payload, created_at, expires_at",
+        "default",
+    )
+    _rebuild_table(
+        conn, "user_chats",
+        """
+        CREATE TABLE user_chats (
+            namespace TEXT NOT NULL DEFAULT 'default',
+            user_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            last_seen_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (namespace, user_id, platform, chat_id)
+        )
+        """,
+        "namespace, user_id, platform, chat_id, last_seen_at",
+        "user_id, platform, chat_id, last_seen_at",
+        "default",
+    )
+    _rebuild_table(
+        conn, "accounts",
+        """
+        CREATE TABLE accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            namespace TEXT NOT NULL DEFAULT 'default',
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            initial_balance_cents INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(namespace, user_id, name)
+        )
+        """,
+        "namespace, user_id, name, initial_balance_cents, sort_order, created_at",
+        "user_id, name, initial_balance_cents, sort_order, created_at",
+        "default",
+    )
+
+    # 仅加列
+    if "namespace" not in _column_names(conn, "imports"):
+        conn.execute("ALTER TABLE imports ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default'")
+    _rebuild_table(
+        conn, "raw_messages",
+        """
+        CREATE TABLE raw_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            namespace TEXT NOT NULL DEFAULT 'default',
+            platform TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(namespace, platform, message_id)
+        )
+        """,
+        "namespace, platform, message_id, user_id, content, created_at",
+        "platform, message_id, user_id, content, created_at",
+        "default",
+    )
+
+    # 机器人表：旧单例结构 → 新多实例结构
+    bcols = _column_names(conn, "bot_configs")
+    if "bot_id" not in bcols:
+        owner = conn.execute("SELECT id FROM admin_users ORDER BY id LIMIT 1").fetchone()
+        owner_id = owner["id"] if owner else 0
+        conn.execute("ALTER TABLE bot_configs RENAME TO bot_configs_old")
+        conn.execute(
+            """
+            CREATE TABLE bot_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                bot_id TEXT NOT NULL,
+                owner_id INTEGER NOT NULL DEFAULT 0,
+                name TEXT NOT NULL DEFAULT '',
+                enabled INTEGER DEFAULT 0,
+                config_enc TEXT NOT NULL DEFAULT '',
+                status TEXT DEFAULT 'stopped',
+                last_error TEXT DEFAULT '',
+                last_message_at TEXT DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(platform, bot_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO bot_configs (platform, bot_id, owner_id, name, enabled, config_enc, status, last_error, last_message_at, updated_at)
+            SELECT platform, 'default', ?, platform, enabled, config_enc, status, last_error, last_message_at, updated_at
+            FROM bot_configs_old
+            """,
+            (owner_id,),
+        )
+        conn.execute("DROP TABLE bot_configs_old")
+
+    conn.execute("PRAGMA user_version = 3")
+
+
+def _rebuild_table(conn, name, create_sql, new_cols, old_cols, ns_value):
+    if "namespace" in _column_names(conn, name):
+        return
+    conn.execute(f"ALTER TABLE {name} RENAME TO {name}_old")
+    conn.execute(create_sql)
+    conn.execute(
+        f"INSERT INTO {name} ({new_cols}) SELECT '{ns_value}', {old_cols} FROM {name}_old"
+    )
+    conn.execute(f"DROP TABLE {name}_old")
 
 
 def execute_safe_backup(conn: sqlite3.Connection, backup_dir: Path | str | None = None) -> Path:

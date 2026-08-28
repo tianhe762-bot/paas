@@ -23,9 +23,19 @@ IMPORT_MIME = {
 class TelegramAdapter(BaseAdapter):
     platform = "telegram"
 
-    def __init__(self, token: str, handler=None) -> None:
+    def __init__(
+        self,
+        token: str,
+        handler=None,
+        namespace: str = "default",
+        bot_id: str = "default",
+        bot_name: str = "",
+    ) -> None:
         super().__init__()
         self.token = token
+        self.namespace = namespace
+        self.bot_id = bot_id
+        self.bot_name = bot_name
         if handler is not None:
             self.set_message_handler(handler)
         proxy = os.environ.get("TELEGRAM_PROXY", "").strip()
@@ -140,6 +150,7 @@ class TelegramAdapter(BaseAdapter):
                 self.last_error = str(exc)
                 log.warning("Telegram file download failed: %s", exc)
         msg = InboundMessage(
+            namespace=self.namespace,
             platform="telegram",
             user_id=user_id,
             chat_id=chat_id,

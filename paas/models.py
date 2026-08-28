@@ -14,6 +14,7 @@ class Attachment(BaseModel):
 class InboundMessage(BaseModel):
     """统一入站协议：无论 QQ 还是 Telegram，Adapter 都转换为该结构。"""
 
+    namespace: str = "default"
     platform: str
     user_id: str
     chat_id: str
