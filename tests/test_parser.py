@@ -106,3 +106,27 @@ def test_transfer_and_fee_parse(conn):
     assert items[0].to_account_name == "银行卡"
     assert items[1].tx_type == "fee"
     assert items[1].account_name == "微信"
+
+
+def test_time_range_year_month():
+    from paas.modules.account.parser import parse_time_range
+
+    base = datetime.date(2026, 8, 28)
+    assert parse_time_range("2025年7月份总共花了多少钱", base) == (
+        datetime.date(2025, 7, 1), datetime.date(2025, 7, 31),
+    )
+    assert parse_time_range("2025年7月", base) == (
+        datetime.date(2025, 7, 1), datetime.date(2025, 7, 31),
+    )
+    assert parse_time_range("2025年的账单", base) == (
+        datetime.date(2025, 1, 1), datetime.date(2025, 12, 31),
+    )
+    assert parse_time_range("去年7月花了多少", base) == (
+        datetime.date(2025, 7, 1), datetime.date(2025, 7, 31),
+    )
+    assert parse_time_range("今年", base) == (
+        datetime.date(2026, 1, 1), base,
+    )
+    assert parse_time_range("7月花了多少", base) == (
+        datetime.date(2026, 7, 1), datetime.date(2026, 7, 31),
+    )

@@ -1,5 +1,6 @@
 import datetime
 
+from paas import timeutil
 from paas.models import ParsedItem
 from paas.modules.account import service as s
 from paas.modules.account.queries import day_summary
@@ -105,13 +106,13 @@ def test_zero_and_skip(conn):
     s.mark_zero(conn, "default", "u1")
     status = conn.execute(
         "SELECT * FROM daily_status WHERE user_id='u1' AND status_date=?",
-        (datetime.date(2026, 8, 28).isoformat(),),
+        (timeutil.iso_today(),),
     ).fetchone()
     assert status["zero_confirmed"] == 1
     s.mark_skipped(conn, "default", "u1")
     status = conn.execute(
         "SELECT * FROM daily_status WHERE user_id='u1' AND status_date=?",
-        (datetime.date(2026, 8, 28).isoformat(),),
+        (timeutil.iso_today(),),
     ).fetchone()
     assert status["skipped"] == 1
 

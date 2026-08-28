@@ -193,6 +193,45 @@ async def test_balance_query_and_stats(client):
     assert "支出" in r2.json()["reply_content"]
 
 
+async def test_query_year_month_balance(client):
+    headers = {"X-Api-Key": "test-api-key"}
+    base = {"platform": "qq", "user_id": "u_qry", "chat_id": "c_qry"}
+
+    async def send(mid, content):
+        r = await client.post(
+            "/api/v1/message/inbound", headers=headers,
+            json={**base, "message_id": mid, "content": content},
+        )
+        assert r.status_code == 200
+        return r.json()
+
+    await send("q1", "2025年7月5日微信吃饭花了25元")
+    await send("q2", "2025年12月8日微信打车花了30元")
+    await send("q3", "2026年8月28日微信吃饭花了40元")
+
+    r = await send("q4", "2025年7月份总共花了多少钱")
+    assert r["status"] == "success"
+    assert "2025-07-01 ~ 2025-07-31" in r["reply_content"]
+    assert "25.00" in r["reply_content"]
+
+    r = await send("q5", "生成2025年的账单")
+    assert r["status"] == "success"
+    assert "2025-01-01 ~ 2025-12-31" in r["reply_content"]
+    assert "55.00" in r["reply_content"]
+
+    r = await send("q6", "我现在的余额是多少")
+    assert r["status"] == "success"
+    assert "余额" in r["reply_content"]
+
+    r = await send("q7", "我总共有多少钱")
+    assert r["status"] == "success"
+    assert "总资产" in r["reply_content"]
+
+    r = await send("q8", "2025年7月")
+    assert r["status"] == "success"
+    assert "2025-07-01 ~ 2025-07-31" in r["reply_content"]
+
+
 async def test_balance_to_flow(client):
     headers = {"X-Api-Key": "test-api-key"}
     base = {"platform": "qq", "user_id": "u_bal2", "chat_id": "c_bal2"}

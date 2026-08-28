@@ -120,14 +120,29 @@ class Router:
     def _is_query(content: str) -> bool:
         if any(
             w in content
-            for w in ("详细", "统计", "余额", "总资产", "还有多少钱", "多少钱", "所有账户", "资产")
+            for w in (
+                "详细", "统计", "余额", "总资产", "还有多少钱", "多少钱",
+                "所有账户", "资产", "账单", "报表", "报告", "汇总", "生成",
+            )
         ):
             return True
         if content in STATS_EXACT:
             return True
         if "多少" in content and any(w in content for w in ("花", "收入", "支出", "钱")):
             return True
+        if re.search(r"\d{4}\s*年", content) and any(
+            w in content for w in ("多少", "账单", "报表", "统计", "汇总", "查询", "花了多少钱")
+        ):
+            return True
+        if ("今年" in content or "去年" in content) and any(
+            w in content for w in ("多少", "账单", "报表", "统计", "汇总", "查询", "花了多少钱")
+        ):
+            return True
         if re.search(r"最近\s*\d+\s*[天日]", content):
+            return True
+        if re.fullmatch(r"\s*\d{4}\s*年(?:\s*\d{1,2}\s*月(?:份)?)?\s*", content):
+            return True
+        if re.fullmatch(r"\s*\d{1,2}\s*月(?:份)?\s*", content):
             return True
         if re.fullmatch(r"\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]?\s*", content):
             return True
@@ -520,12 +535,21 @@ class Router:
     async def _handle_query(self, conn, msg: InboundMessage, content: str) -> Reply:
         # 账户余额 / 总资产
         accounts_in_text = detect_accounts(content)
-        if ("余额" in content or ("还有" in content and "多少" in content)) and (
-            accounts_in_text or "总资产" in content
-        ):
-            return self._balance_reply(conn, msg.namespace, msg.user_id, accounts_in_text[0] if accounts_in_text else None)
-        if "总资产" in content or "所有账户" in content or (accounts_in_text and "资产" in content):
-            return self._balance_reply(conn, msg.namespace, msg.user_id, None)
+        money_query = (
+            "余额" in content
+            or "总资产" in content
+            or "所有账户" in content
+            or "全部账户" in content
+            or (
+                any(w in content for w in ("还有多少钱", "有多少钱", "总共多少钱", "总共有多少钱", "一共有多少钱", "多少钱"))
+                and not any(w in content for w in ("花", "支出", "消费", "收入", "花费"))
+            )
+        )
+        if money_query:
+            return self._balance_reply(
+                conn, msg.namespace, msg.user_id,
+                accounts_in_text[0] if accounts_in_text else None,
+            )
 
         # 时间段统计
         today = timeutil.today()

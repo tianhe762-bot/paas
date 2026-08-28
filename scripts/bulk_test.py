@@ -12,7 +12,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from paas import settings_store
+from paas import settings_store, timeutil
 from paas.config import settings
 from paas.db import connect, init_db
 from paas.models import InboundMessage
@@ -21,7 +21,7 @@ from paas.modules.account.importer import parse_import
 from paas.modules.account.parser import parse_amount_cents, parse_expense_date
 from paas.router import Router
 
-TODAY = datetime.date(2026, 8, 28)
+TODAY = None  # 运行时由 run_bulk 设置为系统当天，保证相对日期断言正确
 
 
 def mkmsg(user, mid, content):
@@ -47,6 +47,9 @@ def _fmt(cents):
 
 
 def build_cases():
+    global TODAY
+    if TODAY is None:
+        TODAY = timeutil.today()
     cases = []
     counter = {"n": 0}
 
@@ -707,12 +710,14 @@ async def run_cases(user_id, cases):
 
 
 def run_bulk(db_path, secret_key_path, user_id="u_bulk"):
+    global TODAY
     settings.db_path = Path(db_path)
     settings.secret_key_path = Path(secret_key_path)
     conn = connect()
     init_db(conn)
     settings_store.ensure_default_settings(conn)
     conn.close()
+    TODAY = timeutil.today()
     cases = build_cases()
     failures = asyncio.run(run_cases(user_id, cases))
     return cases, failures

@@ -73,9 +73,18 @@ async def test_export_date_range(client):
     await client.post(
         "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
     )
-    await _seed(client)
-    resp = await client.get("/admin/api/export?user_id=u_export&format=csv&start=2026-08-28&end=2026-08-28")
+    headers = {"X-Api-Key": "test-api-key"}
+    for mid, content in [
+        ("r1", "2026年8月20日微信吃饭花了25元"),
+        ("r2", "2026年8月21日支付宝打车花了35元"),
+        ("r3", "今天银行卡收入100元"),
+    ]:
+        r = await client.post(
+            "/api/v1/message/inbound", headers=headers,
+            json={"platform": "qq", "user_id": "u_export", "chat_id": "c_x", "message_id": mid, "content": content},
+        )
+        assert r.status_code == 200
+    resp = await client.get("/admin/api/export?user_id=u_export&format=csv&start=2026-08-20&end=2026-08-20")
     rows = list(csv.DictReader(io.StringIO(resp.content.decode("utf-8-sig"))))
-    assert len(rows) == 2  # 只有今天的 25 元与 100 元收入
-    assert all(r["日期"] == "2026-08-28" for r in rows)
-
+    assert len(rows) == 1
+    assert rows[0]["日期"] == "2026-08-20"

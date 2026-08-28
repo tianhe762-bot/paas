@@ -343,7 +343,8 @@ def parse_modify_request(text: str) -> dict:
 
 
 def parse_time_range(text: str, base: datetime.date) -> Optional[tuple[datetime.date, datetime.date]]:
-    """识别统计时间段：今天/昨天/本周/上周/本月/上月/X月/X月Y日到X月Z日/最近N天。"""
+    """识别统计时间段：今天/昨天/本周/上周/本月/上月/今年/去年/
+    X月/X年/X年X月/X月Y日到X月Z日/最近N天。"""
     if "今天" in text:
         return base, base
     if "昨天" in text:
@@ -365,6 +366,29 @@ def parse_time_range(text: str, base: datetime.date) -> Optional[tuple[datetime.
         return prev_last.replace(day=1), prev_last
     if "本月" in text or "这个月" in text:
         return base.replace(day=1), base
+
+    # 去年/今年 + 可选月份
+    m = re.search(r"去年\s*(\d{1,2})\s*月(?:份)?", text)
+    if m:
+        return _month_range(base.year - 1, int(m.group(1)), base)
+    m = re.search(r"今年\s*(\d{1,2})\s*月(?:份)?", text)
+    if m:
+        return _month_range(base.year, int(m.group(1)), base)
+    if "去年" in text:
+        return datetime.date(base.year - 1, 1, 1), datetime.date(base.year - 1, 12, 31)
+    if "今年" in text:
+        return datetime.date(base.year, 1, 1), base
+
+    # 2025年7月 / 2025年7月份
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月(?:份)?", text)
+    if m:
+        return _month_range(int(m.group(1)), int(m.group(2)), base)
+    # 2025年（全年）
+    m = re.search(r"(\d{4})\s*年", text)
+    if m and not re.search(r"\d{1,2}\s*月", text):
+        year = int(m.group(1))
+        return datetime.date(year, 1, 1), datetime.date(year, 12, 31)
+
     m = re.search(
         r"(\d{4})年(\d{1,2})月(\d{1,2})[日号]?(?:到|至|-|~|—)(\d{4})年?(\d{1,2})月(\d{1,2})[日号]?",
         text,
@@ -386,15 +410,9 @@ def parse_time_range(text: str, base: datetime.date) -> Optional[tuple[datetime.
                 return s, e
         except ValueError:
             pass
-    m = re.fullmatch(r"\s*(\d{1,2})\s*月\s*", text) or re.search(r"(\d{1,2})月的统计|(\d{1,2})月花了", text)
+    m = re.search(r"(?:^|[^0-9])(\d{1,2})\s*月(?:份)?(?:的|花了|总共|支出|收入|消费|统计|账单|报表)?", text)
     if m:
-        month = int(m.group(1) or m.group(2))
-        try:
-            first = datetime.date(base.year, month, 1)
-            last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
-            return first, min(last, base)
-        except ValueError:
-            pass
+        return _month_range(base.year, int(m.group(1)), base)
     m = re.search(r"最近\s*(\d+)\s*[天日]", text)
     if m:
         days = int(m.group(1))
@@ -407,3 +425,14 @@ def parse_time_range(text: str, base: datetime.date) -> Optional[tuple[datetime.
         except ValueError:
             pass
     return None
+
+
+def _month_range(year: int, month: int, base: datetime.date) -> Optional[tuple[datetime.date, datetime.date]]:
+    try:
+        first = datetime.date(year, month, 1)
+    except ValueError:
+        return None
+    last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
+    if first > base:
+        return first, last
+    return first, min(last, base)
