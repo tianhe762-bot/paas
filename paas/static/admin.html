@@ -169,13 +169,13 @@
       <div class="row" style="margin-top:8px">
         <div class="card" style="margin:0">
           <strong>更新到最新代码</strong>
-          <p class="muted">一键模式基于当前项目目录重建并重启容器；如需先拉取最新代码，请先执行手动命令。</p>
-          <button class="btn-primary" onclick="runMaintenance('update')">一键更新</button>
+          <p class="muted">基于当前项目目录重建并重启容器；如需先拉取最新代码，请先执行手动命令。</p>
+          <button class="btn-primary" onclick="runMaintenance('update')">更新并重建</button>
         </div>
         <div class="card" style="margin:0">
           <strong>卸载（保留个人数据）</strong>
           <p class="muted">停止并移除容器，保留 data/ 数据目录；之后可随时重新部署恢复。</p>
-          <button class="btn-ghost" onclick="runMaintenance('uninstall_keep')">一键卸载（保留数据）</button>
+          <button class="btn-ghost" onclick="runMaintenance('uninstall_keep')">卸载（保留数据）</button>
         </div>
         <div class="card" style="margin:0">
           <strong>卸载（删除全部数据）</strong>
@@ -187,7 +187,7 @@
       <div style="margin-top:14px"><span class="msg" id="msg-maintenance"></span></div>
     </div>
     <div class="card">
-      <h2>手动命令（无需开启一键模式）</h2>
+      <h2>手动命令</h2>
       <div id="maintCommands"></div>
     </div>
   </div>
@@ -432,7 +432,7 @@ function showTab(name) {
 async function loadMaintenance() {
   try {
     const r = await api("/admin/api/maintenance/status");
-    document.getElementById("maintAvail").textContent = r.available ? "一键模式已开启" : "一键模式未开启";
+    document.getElementById("maintAvail").textContent = r.available ? "可直接使用" : "暂不可用";
     document.getElementById("maintReason").textContent = r.reason || "";
     const box = document.getElementById("maintCommands");
     box.innerHTML = "";
