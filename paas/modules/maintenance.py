@@ -36,14 +36,14 @@ def maintenance_available() -> tuple[bool, str]:
 
 def build_command(action: str) -> list[str]:
     if action == "update":
-        return ["docker", "compose", "-f", "/host-paas/compose.yaml", "up", "-d", "--build"]
+        return ["docker-compose", "-f", "/host-paas/compose.yaml", "up", "-d", "--build"]
     if action == "uninstall_keep":
-        return ["docker", "compose", "-f", "/host-paas/compose.yaml", "down"]
+        return ["docker-compose", "-f", "/host-paas/compose.yaml", "down"]
     if action == "uninstall_all":
         return [
             "sh", "-c",
-            "docker compose -f /host-paas/compose.yaml down; "
-            "rm -rf /host-paas-data/*; docker rmi paas:latest || true",
+            "docker-compose -f /host-paas/compose.yaml down --rmi local; "
+            "rm -rf /host-paas-data/*",
         ]
     raise ValueError(f"未知操作: {action}")
 

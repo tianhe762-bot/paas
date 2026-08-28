@@ -4,7 +4,7 @@ import pytest
 def test_build_commands():
     from paas.modules.maintenance import build_command
 
-    assert build_command("update")[0:2] == ["docker", "compose"]
+    assert build_command("update")[0] == "docker-compose"
     assert "down" in build_command("uninstall_keep")
     assert "rm -rf /host-paas-data/*" in build_command("uninstall_all")[-1]
     with pytest.raises(ValueError):
