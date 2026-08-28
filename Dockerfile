@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
+    && apt-get install -y --no-install-recommends tzdata docker.io docker-compose-v2 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash paas \
     && mkdir -p /app/data /app/logs \

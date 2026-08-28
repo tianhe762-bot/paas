@@ -6,17 +6,17 @@ services:
     restart: unless-stopped
     # 与宿主机共享网络：容器流量走宿主机的 fake-ip 透明代理（Telegram 等被代理域名可直连）
     network_mode: host
+    # 网页端"更新与卸载"需要访问宿主机 Docker socket，容器以 root 运行（个人自用服务器）
+    user: root
     env_file: .env
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       TELEGRAM_PROXY: ${TELEGRAM_PROXY:-}
-      # 网页端"更新与卸载"一键模式：默认开启（PAAS_MAINTENANCE=0 可关闭）
-      PAAS_MAINTENANCE: ${PAAS_MAINTENANCE:-1}
       PAAS_HOST_PROJECT: ${PAAS_HOST_PROJECT:-/opt/paas}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      # 一键维护需要访问宿主机 Docker 与项目目录（见 README 安全说明）
+      # 网页端"更新与卸载"需要访问宿主机 Docker 与项目目录（见 README 安全说明）
       - /var/run/docker.sock:/var/run/docker.sock
       - ${PAAS_HOST_PROJECT:-/opt/paas}:/host-paas:ro
       - ${PAAS_HOST_PROJECT:-/opt/paas}/data:/host-paas-data

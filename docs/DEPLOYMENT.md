@@ -41,7 +41,7 @@ docker compose up -d --build
 docker compose logs -f paas
 ```
 
-> 网页端「更新与卸载」一键模式默认开启：compose.yaml 会向容器挂载 Docker socket 与项目目录（`PAAS_HOST_PROJECT`，默认 `/opt/paas`）。这等价于把宿主机 Docker 控制权交给容器，仅建议个人自用服务器；如需关闭，在 `.env` 设置 `PAAS_MAINTENANCE=0` 并移除 compose.yaml 中对应挂载后重建。
+> 网页端「更新与卸载」默认直接可用：compose.yaml 会向容器挂载 Docker socket 与项目目录（`PAAS_HOST_PROJECT`，默认 `/opt/paas`），容器以 root 运行，paas 镜像内置 docker CLI 与 compose 插件。这等价于把宿主机 Docker 控制权交给容器，仅建议个人自用服务器；如需彻底关闭，移除 compose.yaml 中 paas 服务的 docker.sock / host-paas 挂载与 `user: root` 后重建。
 
 5. 打开 `http://<服务器IP>:8000/admin` 配置机器人。
 

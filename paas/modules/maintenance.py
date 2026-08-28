@@ -1,7 +1,8 @@
-"""网页端"更新与卸载"：一键维护（默认启用，需挂载 Docker socket + 项目目录）。
+"""网页端"更新与卸载"：直接执行（默认可用，无需模式开关）。
 
-默认通过 compose.yaml 挂载 Docker socket 与项目目录；PAAS_MAINTENANCE=0 可关闭。
-不可用时，管理面板展示手动命令。
+compose.yaml 默认挂载宿主机 Docker socket 与项目目录、容器以 root 运行；
+paas 镜像内置 docker CLI + compose 插件，维护操作在独立的辅助容器中执行，
+避免更新重建时打断自身。
 """
 
 import logging
@@ -16,7 +17,7 @@ log = logging.getLogger("paas.maintenance")
 SOCKET = Path("/var/run/docker.sock")
 HOST_PROJECT = Path("/host-paas")
 HOST_DATA = Path("/host-paas-data")
-HELPER_IMAGE = "docker:cli"
+HELPER_IMAGE = "paas:latest"
 UNINSTALL_ALL_CONFIRM = "删除全部数据"
 ACTIONS = {"update", "uninstall_keep", "uninstall_all"}
 
@@ -26,8 +27,6 @@ def host_project_dir() -> str:
 
 
 def maintenance_available() -> tuple[bool, str]:
-    if os.environ.get("PAAS_MAINTENANCE", "0") != "1":
-        return False, "未启用一键维护模式（PAAS_MAINTENANCE=0；可在 .env 改为 1 后重建）"
     if not SOCKET.exists():
         return False, "未挂载 Docker socket（/var/run/docker.sock）"
     if not (HOST_PROJECT / "compose.yaml").exists():
@@ -88,6 +87,7 @@ async def run_maintenance(action: str, confirm: str) -> dict:
     config = {
         "Image": HELPER_IMAGE,
         "Cmd": cmd,
+        "User": "root",
         "WorkingDir": "/host-paas",
         "HostConfig": {
             "Binds": [

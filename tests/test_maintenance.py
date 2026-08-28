@@ -19,22 +19,33 @@ def test_commands_text():
     assert "rm -rf" in cmds["uninstall_all"]
 
 
-def test_available_requires_env_and_socket(monkeypatch):
+def test_available_requires_socket_and_project(tmp_path, monkeypatch):
     from paas.modules import maintenance
 
-    monkeypatch.delenv("PAAS_MAINTENANCE", raising=False)
+    monkeypatch.setattr(maintenance, "SOCKET", tmp_path / "docker.sock")
+    monkeypatch.setattr(maintenance, "HOST_PROJECT", tmp_path / "host-paas")
     ok, reason = maintenance.maintenance_available()
     assert not ok
-    assert "未启用" in reason
+    assert "socket" in reason.lower() or "Docker" in reason
+    # 有 socket 但缺少项目 compose.yaml
+    (tmp_path / "docker.sock").touch()
+    ok, reason = maintenance.maintenance_available()
+    assert not ok
+    assert "项目目录" in reason
+    # socket 与项目都满足
+    (tmp_path / "host-paas").mkdir()
+    (tmp_path / "host-paas" / "compose.yaml").touch()
+    ok, _ = maintenance.maintenance_available()
+    assert ok
 
 
-async def test_run_maintenance_unavailable(monkeypatch):
+async def test_run_maintenance_unavailable(tmp_path, monkeypatch):
     from paas.modules import maintenance
 
-    monkeypatch.delenv("PAAS_MAINTENANCE", raising=False)
+    monkeypatch.setattr(maintenance, "SOCKET", tmp_path / "docker.sock")
     r = await maintenance.run_maintenance("update", "")
     assert r["ok"] is False
-    assert "未启用" in r["error"]
+    assert "socket" in r["error"].lower() or "Docker" in r["error"]
 
 
 async def test_uninstall_all_requires_confirm(monkeypatch):

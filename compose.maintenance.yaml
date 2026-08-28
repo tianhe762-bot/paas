@@ -1,5 +1,4 @@
-# 网页端"更新与卸载"一键模式已默认启用（配置已合入 compose.yaml）。
+# 网页端"更新与卸载"已默认直接可用（配置已合入 compose.yaml），不再需要任何覆盖文件。
 # 本文件仅作兼容占位：旧命令 `docker compose -f compose.yaml -f compose.maintenance.yaml up -d`
-# 仍可正常使用；不需要再做任何覆盖。
-# 关闭一键模式：在 .env 设置 PAAS_MAINTENANCE=0，并移除 compose.yaml 中 paas 服务
-# 的 docker.sock / host-paas 挂载后重新 `docker compose up -d`。
+# 仍可正常使用。如完全不需要网页端维护，移除 compose.yaml 中 paas 服务的
+# docker.sock / host-paas 挂载与 user: root 后重新 `docker compose up -d`。
