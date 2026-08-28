@@ -6,9 +6,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# docker CLI + compose 插件：网页端"更新与卸载"需调用宿主机 Docker
+# （trixie 仓库无 docker-compose-v2 包，改用官方静态二进制）
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata docker.io docker-compose-v2 \
-    && rm -rf /var/lib/apt/lists/* \
+    && apt-get install -y --no-install-recommends tzdata ca-certificates curl \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz" | tar -xz -C /tmp \
+    && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/v2.33.1/docker-compose-linux-x86_64" \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+    && rm -rf /var/lib/apt/lists/* /tmp/docker \
     && useradd --create-home --shell /bin/bash paas \
     && mkdir -p /app/data /app/logs \
     && chown -R paas:paas /app
