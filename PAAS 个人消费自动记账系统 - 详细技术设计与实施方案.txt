@@ -1,0 +1,1342 @@
+PAAS (Personal Auto Accounting System) 个人消费自动记账系统
+详细技术设计与实施方案
+一、项目概述与系统定位
+1.1 项目背景
+传统记账应用操作繁琐（打开应用 -> 选择分类 -> 输入金额 -> 输入备注 -> 保存），导致长期记账习惯难以维持。PAAS 项目的核心目标是将记账过程转变为自然的聊天体验：用户在微信或 QQ 中随时发送口语化的消费记录（如"今天中午吃火锅花了86，打车回家23块"），由服务器在后台自动完成多笔消费拆分、语义理解、金额与日期提取、分类映射、数据校验、持久化存储以及定时提醒与统计报表生成。
+1.2 核心特性
+* 纯自然语言输入：支持单笔、多笔组合、口语化模糊表述（如"二十多块"、"花了35左右"）、相对日期（"昨天"、"前天"、"8月25号"）及中文数字转换。
+* 本地化与隐私安全：核心规则解析与数据均在本地 Debian 服务器完成，不依赖外部第三方商业记账云端。
+* 平台解耦与多渠道支持：通过 Adapter 适配器模式，核心服务与微信、QQ 等聊天客户端完全解耦。
+* 7×24 小时无人值守运行：基于 systemd 守护进程、SQLite WAL 模式与 APScheduler 定时任务，实现稳定自愈、梯次提醒与自动热备份。
+1.3 核心设计五层原则
+* 接入层：负责"把消息送进来"，统一协议，异步解耦；
+* 解析层：负责"理解用户意图"，规则优先，模型降级；
+* 校验层：负责"防止逻辑犯错"，Schema 约束，数据清洗；
+* 存储层：负责"可靠安全持久化"，事务隔离，热备轮转；
+* 守护层：负责"保证 7×24 小时运行"，服务自愈，定时调度。
+二、系统总体架构与数据流
+2.1 整体架构图
+微信 / QQ 客户端 (真人聊天 / Bot)
+
+
+       │
+
+
+       ▼
+
+
+┌─────────────────────────────────┐
+
+
+│     Message Adapter (适配器)     │ ── 格式转换、心跳维持、断线重连
+
+
+└────────────────┬────────────────┘
+
+
+                 │ HTTP / WebSocket (统一 JSON 协议)
+
+
+                 ▼
+
+
+┌─────────────────────────────────┐
+
+
+│   FastAPI Gateway (接入网关)    │ ── 鉴权、消息防重、异步入队
+
+
+└────────────────┬────────────────┘
+
+
+                 │
+
+
+                 ▼
+
+
+┌─────────────────────────────────┐
+
+
+│    Worker 消费信息解析引擎      │
+
+
+│  ┌───────────────────────────┐  │
+
+
+│  │ 第一层：规则引擎 (正则/分词)│  │ ── 处理常规结构化表达
+
+
+│  └─────────────┬─────────────┘  │
+
+
+│                ▼                │
+
+
+│  ┌───────────────────────────┐  │
+
+
+│  │ 第二层：本地模型/OCR (兜底) │  │ ── 处理复杂语义与图片小票
+
+
+│  └─────────────┬─────────────┘  │
+
+
+│                ▼                │
+
+
+│  ┌───────────────────────────┐  │
+
+
+│  │ 第三层：Pydantic 严格校验 │  │ ── 数值正数、合法性清洗
+
+
+│  └───────────────────────────┘  │
+
+
+└────────────────┬────────────────┘
+
+
+                 │
+
+
+                 ▼
+
+
+┌─────────────────────────────────┐
+
+
+│     多轮对话状态机 (State Loop) │ ── 模糊分类/30秒防抖二次确认
+
+
+└────────────────┬────────────────┘
+
+
+                 │ 确认完成
+
+
+                 ▼
+
+
+┌─────────────────────────────────┐
+
+
+│     SQLite 数据库 (WAL 模式)    │ ── 消费记录、每日状态、多轮会话
+
+
+└────────┬───────────────┬────────┘
+
+
+         │               │
+
+
+         ▼               ▼
+
+
+┌────────────────┐ ┌────────────────┐
+
+
+│  统计分析引擎  │ │ 定时任务调度器 │
+
+
+│  日/周/月/年报 │ │ 21/22/00:00提醒│
+
+
+│  CSV/Excel导出 │ │ 每日热备快照   │
+
+
+└────────────────┘ └────────────────┘
+2.2 统一消息协议规范
+无论消息来源于微信还是 QQ，接入层 Adapter 必须将其封装为如下统一 JSON 结构推送到服务端 API：
+
+
+请求 Payload (POST /api/v1/message/inbound):{
+
+
+  "platform": "wechat",
+
+
+  "user_id": "u_982341",
+
+
+  "chat_id": "c_55412",
+
+
+  "message_id": "msg_20260828_120101_889",
+
+
+  "timestamp": "2026-08-28T12:01:01",
+
+
+  "message_type": "text",
+
+
+  "content": "今天中午和同事吃火锅花了86，打车回家23块"
+
+
+}
+
+
+响应规范:{
+
+
+  "status": "success",
+
+
+  "reply_content": "✅ 已记录 2 笔消费：\n🍜 餐饮：86.00 元（吃火锅）\n🚕 交通：23.00 元（回家）\n\n今日累计支出：109.00 元",
+
+
+  "parsed_count": 2,
+
+
+  "requires_confirmation": false
+
+
+}
+三、微信/QQ 接入与平台解耦设计
+3.1 接入场景分析
+1. 机器人聊天框（Bot API）：通过官方/社区机器人接口直接接收与回复，实现简单，适合单人独立对话。
+2. 普通真人聊天框（Client Hook / Bridge）：需在客户端部署本地监听与消息转发桥接器。
+3. 架构解耦原则：核心记账服务不直连任何平台私有 SDK，统一由外部 Adapter 负责维护登录态与网络重连。即便微信/QQ 掉线或网络抖动，主记账系统持续正常运转。
+四、消费信息解析体系 (三层架构)
+4.1 第一层：规则引擎（能不用模型就不用模型）
+* 分句切割：依据逗号、分号、换行以及连接词（"另外"、"随后"、"然后"、"并且"）将复合语句切割为单笔子句。
+* 相对日期解析：识别"今天"、"昨天"、"前天"、"大前天"及标准日期（如"8月25日"），自动换算为 ISO 8601 日期。
+* 金额与中文数字转换：正则提取数值，并内置汉字数字解析器（支持"三十五"、"二十多"、"十八"等转阿拉伯数字）。
+* 分类关键词匹配：根据分类关键词库打分，命中最高权重的类别。
+4.2 第二层：本地轻量模型 / OCR 兜底
+* 当规则引擎置信度不足、遇到复杂多重从句或上传账单小票截图时，将任务移交本地模型 Worker 异步处理，避免阻塞主 API。
+* 模型输出强制约束为结构化 JSON 格式。
+4.3 第三层：Pydantic 严格数据清洗
+* 拦截非法金额（如负数、异常巨额）、无效日期与非法枚举分类，确保只有干净数据进入后续流程。
+五、对话状态机与多轮确认机制
+5.1 状态流转定义
+* IDLE：正常待命状态。
+* PENDING_CONFIRMATION：待确认状态。
+   * 分类模糊确认：如用户输入"买了100块"，系统提示用户从常用分类中选择。
+   * 30 秒防抖确认：短时间内（如 30 秒内）检测到同一用户输入相同金额与描述时，不静默丢弃，而是返回提示："⚠️ 检测到 30 秒内已有一笔相同消费，是否确认重复记录？回复【是】确认，回复【否】取消。"
+* WAITING_REMINDER_REPLY：等待定时提醒回复。
+5.2 特殊意图处理
+* 今日无消费：用户回复"今天没花钱"、"无消费"时，更新 daily_status.zero_confirmed=1，不在消费表中生成 0 元脏记录，保持统计指标纯净。
+* 跳过今日：用户回复"跳过"、"不记了"时，更新 daily_status.skipped=1，用以区分"无消费"与"用户放弃记录"。
+六、数据库设计 (SQLite DDL)
+PRAGMA journal_mode = WAL;
+
+
+PRAGMA foreign_keys = ON;
+
+
+-- 1. 分类表
+
+
+CREATE TABLE IF NOT EXISTS categories (
+
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+
+    name TEXT NOT NULL UNIQUE,
+
+
+    icon TEXT DEFAULT '',
+
+
+    keywords TEXT NOT NULL
+
+
+);
+
+
+-- 2. 核心消费记录表
+
+
+CREATE TABLE IF NOT EXISTS expenses (
+
+
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+
+    user_id TEXT NOT NULL,
+
+
+    expense_date DATE NOT NULL,
+
+
+    category_id INTEGER NOT NULL,
+
+
+    amount DECIMAL(10, 2) NOT NULL,
+
+
+    description TEXT NOT NULL,
+
+
+    platform TEXT NOT NULL,
+
+
+    message_id TEXT NOT NULL,
+
+
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+
+    FOREIGN KEY (category_id) REFERENCES categories(id)
+
+
+);
+
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_msg ON expenses (platform, message_id);
+
+
+CREATE INDEX IF NOT EXISTS idx_expense_query ON expenses (user_id, expense_date);
+
+
+-- 3. 每日上报状态表
+
+
+CREATE TABLE IF NOT EXISTS daily_status (
+
+
+    user_id TEXT NOT NULL,
+
+
+    status_date DATE NOT NULL,
+
+
+    reported INTEGER DEFAULT 0,
+
+
+    zero_confirmed INTEGER DEFAULT 0,
+
+
+    skipped INTEGER DEFAULT 0,
+
+
+    reminder_count INTEGER DEFAULT 0,
+
+
+    PRIMARY KEY(user_id, status_date)
+
+
+);
+
+
+-- 4. 会话待确认表
+
+
+CREATE TABLE IF NOT EXISTS pending_actions (
+
+
+    user_id TEXT PRIMARY KEY,
+
+
+    action_type TEXT NOT NULL,
+
+
+    payload TEXT NOT NULL,
+
+
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+
+
+);
+七、定时调度与自动热备份
+7.1 梯次提醒逻辑 (APScheduler)
+* 21:00 / 22:00 / 00:00 触发检查：
+   * 若当天 reported=0 且 zero_confirmed=0 且 skipped=0，向用户发送温和提醒；
+   * 若用户已上报或已确认无消费，则静默跳过，避免打扰。
+7.2 安全热备份策略
+* 严禁直接拷贝运行中的 SQLite .db 文件。
+* 使用 SQLite 官方提供的在线备份 API (src_conn.backup(dst_conn)) 执行事务级热备份，自动压缩并保留最近 30 天快照。
+八、统计分析与报表系统
+* 日报：今日总金额、分类明细列表、同比昨日变化。
+* 周报 / 月报：周期总开销、最高开支日、Top 3 分类占比、日均支出。
+* 年报：年度总支出、月度波动曲线、分类年度分布。
+* 导出格式：聊天即时文字汇总、CSV、Excel (.xlsx)。
+九、Debian 部署与 7×24 小时运维
+9.1 目录布局与权限隔离
+* 创建专用系统用户：useradd -m -s /bin/bash account
+* 项目目录：/opt/auto-account，除 data/ 与 logs/ 外均设为只读。
+9.2 systemd 服务配置 (/etc/systemd/system/auto-account.service)
+i
+[Unit]
+Description=PAAS Auto Accounting Daemon
+After=network.target
+
+
+[Service]
+Type=simple
+User=account
+Group=account
+WorkingDirectory=/opt/auto-account
+Environment="PATH=/opt/auto-account/venv/bin:/usr/local/bin:/usr/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/auto-account/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5s
+
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/auto-account/data /opt/auto-account/logs
+PrivateTmp=true
+
+
+[Install]
+WantedBy=multi-user.target
+
+
+### 十、Phase 1 MVP 完整可运行代码
+
+
+#### 10.1 `requirements.txt`
+
+
+```text
+
+
+fastapi>=0.110.0
+
+
+uvicorn>=0.28.0
+
+
+pydantic>=2.6.0
+
+
+apscheduler>=3.10.4
+
+
+pyyaml>=6.0.1
+10.2 app/database.py
+import sqlite3
+
+
+import datetime
+
+
+from pathlib import Path
+
+
+from typing import List, Dict, Any
+
+
+DB_PATH = Path("data/account.db")
+
+
+BACKUP_DIR = Path("data/backups")
+
+
+def get_db_connection() -> sqlite3.Connection:
+
+
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+
+
+    conn.row_factory = sqlite3.Row
+
+
+    conn.execute("PRAGMA journal_mode = WAL;")
+
+
+    conn.execute("PRAGMA foreign_keys = ON;")
+
+
+    return conn
+
+
+def init_db():
+
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+    
+
+
+    with get_db_connection() as conn:
+
+
+        cursor = conn.cursor()
+
+
+        cursor.execute("""
+
+
+        CREATE TABLE IF NOT EXISTS categories (
+
+
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+
+            name TEXT NOT NULL UNIQUE,
+
+
+            icon TEXT DEFAULT '',
+
+
+            keywords TEXT NOT NULL
+
+
+        );
+
+
+        """)
+
+
+        cursor.execute("""
+
+
+        CREATE TABLE IF NOT EXISTS expenses (
+
+
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+
+            user_id TEXT NOT NULL,
+
+
+            expense_date DATE NOT NULL,
+
+
+            category_id INTEGER NOT NULL,
+
+
+            amount DECIMAL(10, 2) NOT NULL,
+
+
+            description TEXT NOT NULL,
+
+
+            platform TEXT NOT NULL,
+
+
+            message_id TEXT NOT NULL,
+
+
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+
+            FOREIGN KEY (category_id) REFERENCES categories(id)
+
+
+        );
+
+
+        """)
+
+
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_msg ON expenses (platform, message_id);")
+
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_expense_query ON expenses (user_id, expense_date);")
+
+
+        
+
+
+        cursor.execute("""
+
+
+        CREATE TABLE IF NOT EXISTS daily_status (
+
+
+            user_id TEXT NOT NULL,
+
+
+            status_date DATE NOT NULL,
+
+
+            reported INTEGER DEFAULT 0,
+
+
+            zero_confirmed INTEGER DEFAULT 0,
+
+
+            skipped INTEGER DEFAULT 0,
+
+
+            reminder_count INTEGER DEFAULT 0,
+
+
+            PRIMARY KEY(user_id, status_date)
+
+
+        );
+
+
+        """)
+
+
+        
+
+
+        cursor.execute("""
+
+
+        CREATE TABLE IF NOT EXISTS pending_actions (
+
+
+            user_id TEXT PRIMARY KEY,
+
+
+            action_type TEXT NOT NULL,
+
+
+            payload TEXT NOT NULL,
+
+
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+
+
+        );
+
+
+        """)
+
+
+        
+
+
+        base_cats = [
+
+
+            (1, '餐饮', '🍜', '饭,面,肯德基,麦当劳,汉堡,火锅,烧烤,奶茶,咖啡,午餐,晚餐,早餐,外卖,AA,吃,零食'),
+
+
+            (2, '交通', '🚕', '打车,滴滴,出租车,地铁,公交,加油,停车,油费,高铁,火车,机票'),
+
+
+            (3, '购物', '🛒', '买,衣服,鞋,数码,淘宝,京东,拼多多,超市,日用'),
+
+
+            (4, '娱乐', '🎮', '电影,游戏,充值,steam,网吧,门票,KTV,剧本杀'),
+
+
+            (5, '生活', '🏠', '水电,房租,物业,话费,网费,理发,洗衣,燃气'),
+
+
+            (6, '医疗', '💊', '药,医院,挂号,门诊,体检'),
+
+
+            (7, '其他', '📦', '')
+
+
+        ]
+
+
+        cursor.executemany("INSERT OR IGNORE INTO categories VALUES (?, ?, ?, ?)", base_cats)
+
+
+        conn.commit()
+
+
+def execute_safe_backup():
+
+
+    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+    target_path = BACKUP_DIR / f"account_{now_str}.db"
+
+
+    with get_db_connection() as src_conn:
+
+
+        with sqlite3.connect(target_path) as dst_conn:
+
+
+            src_conn.backup(dst_conn)
+
+
+    return str(target_path)
+10.3 app/parser.py
+import re
+
+
+import datetime
+
+
+from typing import List, Optional, Tuple, Dict, Any
+
+
+from pydantic import BaseModel, Field
+
+
+CN_NUM = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+
+
+def parse_chinese_number(val: str) -> Optional[float]:
+
+
+    if not val:
+
+
+        return None
+
+
+    try:
+
+
+        return float(val)
+
+
+    except ValueError:
+
+
+        pass
+
+
+    if val == "十": return 10.0
+
+
+    if len(val) == 2 and val[0] == "十": return 10.0 + CN_NUM.get(val[1], 0)
+
+
+    if len(val) == 2 and val[1] == "十": return CN_NUM.get(val[0], 0) * 10.0
+
+
+    if len(val) == 3 and val[1] == "十": return CN_NUM.get(val[0], 0) * 10.0 + CN_NUM.get(val[2], 0)
+
+
+    if len(val) == 1 and val in CN_NUM: return float(CN_NUM[val])
+
+
+    return None
+
+
+class ParsedItem(BaseModel):
+
+
+    expense_date: datetime.date
+
+
+    category_id: int
+
+
+    category_name: str
+
+
+    category_icon: str
+
+
+    amount: float = Field(gt=0)
+
+
+    description: str
+
+
+class RuleParser:
+
+
+    def __init__(self, categories: List[Dict[str, Any]]):
+
+
+        self.categories = categories
+
+
+    def parse(self, text: str, base_date: datetime.date) -> List[ParsedItem]:
+
+
+        items = []
+
+
+        clauses = re.split(r'[，,；;\n\s]+|(?=另外|随后|然后|并且)', text)
+
+
+|---|---|---|
+
+
+        for clause in clauses:
+
+
+            clause = clause.strip()
+
+
+            if not clause:
+
+
+                continue
+
+
+                
+
+
+            target_date = base_date
+
+
+            if "昨天" in clause: target_date = base_date - datetime.timedelta(days=1)
+
+
+            elif "前天" in clause: target_date = base_date - datetime.timedelta(days=2)
+
+
+            
+
+
+            amt_match = re.search(r'([0-9]+(?:\.[0-9]+)?|[一二两三四五六七八九十]+)\s*(?:元|块|rmb|RMB)?', clause)
+
+
+            if not amt_match:
+
+
+                continue
+
+
+                
+
+
+            amt = parse_chinese_number(amt_match.group(1))
+
+
+            if not amt or amt <= 0:
+
+
+                continue
+
+
+                
+
+
+            matched_cat = self._match_category(clause)
+
+
+            desc = re.sub(r'今天|昨天|前天|花了|付了|我出了|[0-9]+(?:\.[0-9]+)?|[一二两三四五六七八九十]+|(?:元|块|rmb|RMB)', '', clause).strip()
+
+
+            if not desc:
+
+
+                desc = matched_cat["name"]
+
+
+            items.append(ParsedItem(
+
+
+                expense_date=target_date,
+
+
+                category_id=matched_cat["id"],
+
+
+                category_name=matched_cat["name"],
+
+
+                category_icon=matched_cat["icon"],
+
+
+                amount=amt,
+
+
+                description=desc
+
+
+            ))
+
+
+        return items
+
+
+    def _match_category(self, clause: str) -> Dict[str, Any]:
+
+
+        for cat in self.categories:
+
+
+            for kw in cat["keywords"]:
+
+
+                if kw and kw in clause:
+
+
+                    return cat
+
+
+        return next((c for c in self.categories if c["name"] == "其他"), self.categories[-1])
+10.4 app/main.py
+import json
+
+
+import datetime
+
+
+from typing import Optional
+
+
+from contextlib import asynccontextmanager
+
+
+from pydantic import BaseModel
+
+
+from fastapi import FastAPI
+
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+
+from app.database import get_db_connection, init_db, execute_safe_backup
+
+
+from app.parser import RuleParser, ParsedItem
+
+
+class InboundPayload(BaseModel):
+
+
+    platform: str
+
+
+    user_id: str
+
+
+    chat_id: Optional[str] = None
+
+
+    message_id: str
+
+
+    timestamp: str
+
+
+    content: str
+
+
+class APIResponse(BaseModel):
+
+
+    status: str
+
+
+    reply_content: str
+
+
+scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+
+
+def reminder_job(hour: int):
+
+
+    today = datetime.date.today()
+
+
+    with get_db_connection() as conn:
+
+
+        cursor = conn.cursor()
+
+
+        cursor.execute("SELECT DISTINCT user_id FROM expenses UNION SELECT user_id FROM daily_status")
+
+
+        users = [row["user_id"] for row in cursor.fetchall()]
+
+
+        for uid in users:
+
+
+            cursor.execute("SELECT reported, zero_confirmed, skipped FROM daily_status WHERE user_id = ? AND status_date = ?", (uid, today))
+
+
+            status = cursor.fetchone()
+
+
+            if not status or (status["reported"] == 0 and status["zero_confirmed"] == 0 and status["skipped"] == 0):
+
+
+                print(f"[{datetime.datetime.now()}] [REMINDER {hour}:00] 触发用户 {uid} 今日消费提醒")
+
+
+def backup_job():
+
+
+    res = execute_safe_backup()
+
+
+    print(f"[{datetime.datetime.now()}] [BACKUP] 自动热备份完成: {res}")
+
+
+@asynccontextmanager
+
+
+async def lifespan(app: FastAPI):
+
+
+    init_db()
+
+
+    scheduler.add_job(reminder_job, "cron", hour=21, minute=0, args=[21])
+
+
+    scheduler.add_job(reminder_job, "cron", hour=22, minute=0, args=[22])
+
+
+    scheduler.add_job(reminder_job, "cron", hour=0, minute=0, args=[0])
+
+
+    scheduler.add_job(backup_job, "cron", hour=3, minute=0)
+
+
+    scheduler.start()
+
+
+    yield
+
+
+    scheduler.shutdown()
+
+
+app = FastAPI(title="PAAS Accounting Core", lifespan=lifespan)
+
+
+def load_categories():
+
+
+    with get_db_connection() as conn:
+
+
+        cursor = conn.cursor()
+
+
+        cursor.execute("SELECT id, name, icon, keywords FROM categories")
+
+
+        return [{"id": r["id"], "name": r["name"], "icon": r["icon"], "keywords": r["keywords"].split(",")} for r in cursor.fetchall()]
+
+
+@app.post("/api/v1/message/inbound", response_model=APIResponse)
+
+
+async def handle_message(payload: InboundPayload):
+
+
+    user_id = payload.user_id
+
+
+    content = payload.content.strip()
+
+
+    today = datetime.date.today()
+
+
+    
+
+
+    with get_db_connection() as conn:
+
+
+        cursor = conn.cursor()
+
+
+        
+
+
+        # 1. 检查待确认动作
+
+
+        cursor.execute("SELECT action_type, payload FROM pending_actions WHERE user_id = ?", (user_id,))
+
+
+        pending = cursor.fetchone()
+
+
+        
+
+
+        if pending:
+
+
+            p_type = pending["action_type"]
+
+
+            p_data = json.loads(pending["payload"])
+
+
+            
+
+
+            if p_type == "DUPLICATE_CONFIRM":
+
+
+                cursor.execute("DELETE FROM pending_actions WHERE user_id = ?", (user_id,))
+
+
+                conn.commit()
+
+
+                if content in ["是", "确认", "是的", "对", "记录"]:
+
+
+                    cursor.execute("""
+
+
+                    INSERT INTO expenses (user_id, expense_date, category_id, amount, description, platform, message_id)
+
+
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+
+
+                    """, (user_id, p_data["expense_date"], p_data["category_id"], p_data["amount"], p_data["description"], payload.platform, payload.message_id))
+
+
+                    conn.commit()
+
+
+                    return APIResponse(status="success", reply_content=f"✅ 已确认并记录：{p_data['amount']:.2f} 元（{p_data['description']}）")
+
+
+                else:
+
+
+                    return APIResponse(status="cancelled", reply_content="👌 已取消该笔可能重复的消费记录。")
+
+
+        # 2. 意图分支：无消费确认
+
+
+        if content in ["今天没花钱", "没花钱", "无消费", "0", "0元"]:
+
+
+            cursor.execute("""
+
+
+            INSERT INTO daily_status (user_id, status_date, zero_confirmed) VALUES (?, ?, 1)
+
+
+            ON CONFLICT(user_id, status_date) DO UPDATE SET zero_confirmed=1
+
+
+            """, (user_id, today))
+
+
+            conn.commit()
+
+
+            return APIResponse(status="success", reply_content="✅ 已确认今日无消费，无需记账。")
+
+
+            
+
+
+        # 3. 意图分支：跳过记录
+
+
+        if content in ["跳过", "跳过今天", "不记了"]:
+
+
+            cursor.execute("""
+
+
+            INSERT INTO daily_status (user_id, status_date, skipped) VALUES (?, ?, 1)
+
+
+            ON CONFLICT(user_id, status_date) DO UPDATE SET skipped=1
+
+
+            """, (user_id, today))
+
+
+            conn.commit()
+
+
+            return APIResponse(status="success", reply_content="👌 已跳过今日记账。")
+
+
+        # 4. 规则解析
+
+
+        categories = load_categories()
+
+
+        parser = RuleParser(categories)
+
+
+        parsed_items = parser.parse(content, today)
+
+
+        
+
+
+        if not parsed_items:
+
+
+            return APIResponse(status="unrecognized", reply_content="未能识别消费内容。请使用类似"今天午饭35，打车18"的表达。")
+
+
+        # 5. 30 秒防抖检测
+
+
+        first_item = parsed_items[0]
+
+
+        cursor.execute("""
+
+
+        SELECT id FROM expenses 
+
+
+        WHERE user_id = ? AND amount = ? AND description = ?
+
+
+          AND datetime(created_at, 'localtime') >= datetime('now', 'localtime', '-30 seconds')
+
+
+        """, (user_id, first_item.amount, first_item.description))
+
+
+        recent_duplicate = cursor.fetchone()
+
+
+        
+
+
+        if recent_duplicate:
+
+
+            pending_json = json.dumps({
+
+
+                "expense_date": str(first_item.expense_date),
+
+
+                "category_id": first_item.category_id,
+
+
+                "amount": first_item.amount,
+
+
+                "description": first_item.description
+
+
+            })
+
+
+            cursor.execute("""
+
+
+            INSERT INTO pending_actions (user_id, action_type, payload) VALUES (?, 'DUPLICATE_CONFIRM', ?)
+
+
+            ON CONFLICT(user_id) DO UPDATE SET action_type='DUPLICATE_CONFIRM', payload=?
+
+
+            """, (user_id, pending_json, pending_json))
+
+
+            conn.commit()
+
+
+            return APIResponse(
+
+
+                status="pending_confirmation",
+
+
+                reply_content=f"⚠️ 检测到 30 秒内刚记录过一笔相同消费：{first_item.amount:.2f} 元（{first_item.description}）。\n这是新消费需要再次记录吗？回复【是】确认，回复【否】取消。"
+
+
+            )
+
+
+        # 6. 正式写入数据库
+
+
+        saved_items = []
+
+
+        for idx, item in enumerate(parsed_items):
+
+
+            sub_id = f"{payload.message_id}_{idx}" if len(parsed_items) > 1 else payload.message_id
+
+
+            try:
+
+
+                cursor.execute("""
+
+
+                INSERT INTO expenses (user_id, expense_date, category_id, amount, description, platform, message_id)
+
+
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+
+
+                """, (user_id, item.expense_date, item.category_id, item.amount, item.description, payload.platform, sub_id))
+
+
+                saved_items.append(item)
+
+
+            except sqlite3.IntegrityError:
+
+
+                continue
+
+
+                
+
+
+        if saved_items:
+
+
+            cursor.execute("""
+
+
+            INSERT INTO daily_status (user_id, status_date, reported) VALUES (?, ?, 1)
+
+
+            ON CONFLICT(user_id, status_date) DO UPDATE SET reported=1
+
+
+            """, (user_id, today))
+
+
+        conn.commit()
+
+
+        if not saved_items:
+
+
+            return APIResponse(status="duplicate", reply_content="⚠️ 该消息已记录过，请勿重复发送。")
+
+
+        # 7. 汇总并回复
+
+
+        cursor.execute("SELECT SUM(amount) as total FROM expenses WHERE user_id = ? AND expense_date = ?", (user_id, today))
+
+
+        total_row = cursor.fetchone()
+
+
+        today_total = float(total_row["total"]) if total_row and total_row["total"] else 0.0
+
+
+        reply_lines = [f"✅ 已记录 {len(saved_items)} 笔消费："]
+
+
+        for it in saved_items:
+
+
+            reply_lines.append(f"{it.category_icon} {it.category_name}：{it.amount:.2f} 元（{it.description}）")
+
+
+        reply_lines.append(f"\n今日累计支出：{today_total:.2f} 元")
+
+
+        return APIResponse(status="success", reply_content="\n".join(reply_lines))
+
+
+if __name__ == "__main__":
+
+
+    import uvicorn
+
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)

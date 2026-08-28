@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store">
+<title>PAAS 管理界面</title>
+<style>
+  :root { --bg:#0f1420; --panel:#171e2e; --panel2:#1d2639; --line:#2a3550;
+          --text:#e6eaf2; --muted:#8b96ad; --accent:#4f8cff; --ok:#3ecf8e; --err:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI", "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width:960px; margin:0 auto; padding:24px 16px 80px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px; }
+  .card h2 { font-size:16px; margin:0 0 14px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input, select, textarea { width:100%; padding:9px 10px; border-radius:8px; border:1px solid var(--line);
+      background:var(--panel2); color:var(--text); font-size:14px; }
+  textarea { min-height:80px; resize:vertical; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:220px; }
+  button { padding:9px 16px; border-radius:8px; border:none; cursor:pointer; font-size:14px; }
+  .btn-primary { background:var(--accent); color:#fff; }
+  .btn-ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  .btn-danger { background:var(--err); color:#fff; }
+  .btn-sm { padding:5px 10px; font-size:12px; }
+  .switch { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .switch input { width:auto; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:20px; font-size:12px; }
+  .badge.ok { background:rgba(62,207,142,.15); color:var(--ok); }
+  .badge.err { background:rgba(255,107,107,.15); color:var(--err); }
+  .badge.off { background:rgba(139,150,173,.15); color:var(--muted); }
+  .msg { padding:10px 12px; border-radius:8px; font-size:13px; margin-top:10px; display:none; }
+  .msg.show { display:block; }
+  .msg.ok { background:rgba(62,207,142,.12); color:var(--ok); }
+  .msg.err { background:rgba(255,107,107,.12); color:var(--err); }
+  .nav { display:flex; gap:8px; margin-bottom:18px; flex-wrap:wrap; }
+  .nav button { background:var(--panel); border:1px solid var(--line); color:var(--text); }
+  .nav button.active { border-color:var(--accent); color:var(--accent); }
+  .hidden { display:none; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
+  .muted { color:var(--muted); font-size:12px; }
+  .login-box { max-width:360px; margin:12vh auto 0; }
+  .login-box .card { padding:28px; }
+  .flex { display:flex; justify-content:space-between; align-items:center; }
+</style>
+</head>
+<body>
+<div class="wrap" id="loginView">
+  <div class="login-box">
+    <div class="card">
+      <h1 style="margin-bottom:14px">PAAS 管理界面</h1>
+      <label>用户名</label>
+      <input id="loginUser" autocomplete="username">
+      <label>密码</label>
+      <input id="loginPass" type="password" autocomplete="current-password">
+      <div style="margin-top:16px"><button class="btn-primary" style="width:100%" onclick="doLogin()">登录</button></div>
+      <div class="msg" id="loginMsg"></div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap hidden" id="appView">
+  <div class="flex">
+    <div>
+      <h1>PAAS 管理界面</h1>
+      <div class="sub">个人消费自动记账系统 · QQ 官方机器人 / Telegram 直连 · <span id="ver" style="color:var(--accent)">v2.1</span></div>
+    </div>
+    <div>
+      <span class="muted" id="who"></span>
+      <button class="btn-ghost btn-sm" style="margin-left:8px" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+
+  <div class="nav" style="margin-top:16px">
+    <button class="active" data-tab="platforms" onclick="showTab('platforms')">平台配置</button>
+    <button data-tab="settings" onclick="showTab('settings')">系统设置</button>
+    <button data-tab="security" onclick="showTab('security')">安全</button>
+    <button data-tab="status" onclick="showTab('status')">状态与备份</button>
+  </div>
+
+  <div id="tab-platforms">
+    <div class="card">
+      <div class="flex">
+        <h2>QQ 官方机器人</h2>
+        <div class="switch">
+          <input type="checkbox" id="qqEnabled">
+          <span class="badge off" id="qqBadge">未启用</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><label>AppID</label><input id="qqAppId" placeholder="开放平台申请的 AppID"></div>
+        <div><label>AppSecret</label><input id="qqAppSecret" type="password" placeholder="留空表示不修改"></div>
+      </div>
+      <div class="row">
+        <div><label>默认会话 ID（提醒发送目标，留空则发到最近会话）</label><input id="qqDefaultChat" placeholder="user_openid"></div>
+        <div><label>会话范围</label>
+          <select id="qqScope">
+            <option value="private">仅单聊</option>
+            <option value="group">仅群聊</option>
+            <option value="both">单聊 + 群聊</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:14px">
+        <button class="btn-ghost" onclick="testConfig('qq')">测试连接</button>
+        <button class="btn-primary" onclick="saveConfig('qq')">保存</button>
+        <span class="msg" id="msg-qq"></span>
+      </div>
+      <p class="muted">接入方式：AppID + AppSecret（<code>bots.qq.com/app/getAppAccessToken</code> 换 access_token），WebSocket 直连官方网关接收 C2C 单聊消息，OpenAPI 回消息，无需任何中转服务。</p>
+    </div>
+
+    <div class="card">
+      <div class="flex">
+        <h2>Telegram 机器人</h2>
+        <div class="switch">
+          <input type="checkbox" id="telegramEnabled">
+          <span class="badge off" id="telegramBadge">未启用</span>
+        </div>
+      </div>
+      <label>Bot Token（@BotFather 获取）</label>
+      <input id="tgToken" type="password" placeholder="123456:ABC-DEF...（留空表示不修改）">
+      <label>默认会话 ID（提醒发送目标，留空则发到最近会话）</label>
+      <input id="tgDefaultChat" placeholder="数字 chat_id">
+      <div style="margin-top:14px">
+        <button class="btn-ghost" onclick="testConfig('telegram')">测试连接</button>
+        <button class="btn-primary" onclick="saveConfig('telegram')">保存</button>
+        <span class="msg" id="msg-telegram"></span>
+      </div>
+      <p class="muted">接入方式：Bot API 长轮询，无需公网回调地址；收到 .csv/.xlsx 文件自动导入账本。</p>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="hidden">
+    <div class="card">
+      <h2>系统设置</h2>
+      <div class="row">
+        <div><label>时区</label><input id="sTimezone"></div>
+        <div><label>提醒时间（小时，逗号分隔，如 21,22,0）</label><input id="sReminderHours"></div>
+        <div><label>防抖窗口（秒）</label><input id="sDedupWindow"></div>
+      </div>
+      <div class="row">
+        <div><label>待确认有效期（秒）</label><input id="sPendingTtl"></div>
+        <div><label>备份保留天数</label><input id="sBackupKeep"></div>
+        <div><label>每日备份时间（小时）</label><input id="sBackupHour"></div>
+      </div>
+      <label>提醒文案</label>
+      <textarea id="sReminderMessage"></textarea>
+      <div style="margin-top:14px">
+        <button class="btn-primary" onclick="saveSettings()">保存设置</button>
+        <span class="msg" id="msg-settings"></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-security" class="hidden">
+    <div class="card">
+      <h2>修改管理员密码</h2>
+      <label>旧密码</label><input id="pOld" type="password">
+      <label>新密码（至少 8 位）</label><input id="pNew" type="password">
+      <label>确认新密码</label><input id="pNew2" type="password">
+      <div style="margin-top:14px">
+        <button class="btn-primary" onclick="changePassword()">修改密码</button>
+        <span class="msg" id="msg-password"></span>
+      </div>
+      <p class="muted">密码仅保存 scrypt 哈希；平台密钥使用 SECRET_KEY 加密后落库，数据库内无明文。</p>
+    </div>
+  </div>
+
+  <div id="tab-status" class="hidden">
+    <div class="card">
+      <h2>运行状态</h2>
+      <table>
+        <thead><tr><th>平台</th><th>状态</th><th>最近消息</th><th>最近错误</th></tr></thead>
+        <tbody id="statusBody"></tbody>
+      </table>
+      <div style="margin-top:12px" class="muted">记账笔数：<span id="statExpenses">-</span> · 导入记录：<span id="statImports">-</span> · 调度器：<span id="statScheduler">-</span></div>
+      <div style="margin-top:14px">
+        <button class="btn-ghost" onclick="loadStatus()">刷新</button>
+        <button class="btn-primary" onclick="backupNow()">立即热备份</button>
+        <a href="/admin/api/import-template" target="_blank" style="margin-left:12px;color:var(--accent)">下载导入模板 (CSV)</a>
+        <span class="msg" id="msg-backup"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>最近导入记录</h2>
+      <table>
+        <thead><tr><th>文件名</th><th>类型</th><th>总数</th><th>成功</th><th>失败</th><th>时间</th></tr></thead>
+        <tbody id="importsBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+async function api(path, opts) {
+  const resp = await fetch(path, Object.assign({headers: {"Content-Type": "application/json"}, credentials: "same-origin"}, opts));
+  if (resp.status === 401) { showLogin(); throw new Error("unauthorized"); }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) { const msg = data.detail || ("HTTP " + resp.status); throw new Error(msg); }
+  return data;
+}
+function showMsg(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text; el.className = "msg show " + (ok ? "ok" : "err");
+  setTimeout(() => el.className = "msg", 6000);
+}
+function showLogin() {
+  document.getElementById("loginView").classList.remove("hidden");
+  document.getElementById("appView").classList.add("hidden");
+}
+async function doLogin() {
+  try {
+    await api("/admin/api/login", {method: "POST", body: JSON.stringify({username: document.getElementById("loginUser").value.trim(), password: document.getElementById("loginPass").value})});
+    await loadApp();
+  } catch (e) { showMsg("loginMsg", "登录失败：" + e.message, false); }
+}
+async function doLogout() { await api("/admin/api/logout", {method: "POST"}); showLogin(); }
+async function loadApp() {
+  document.getElementById("loginView").classList.add("hidden");
+  document.getElementById("appView").classList.remove("hidden");
+  const me = await api("/admin/api/me");
+  document.getElementById("who").textContent = me.username;
+  await Promise.all([loadConfigs(), loadSettings(), loadStatus()]);
+}
+function showTab(name) {
+  document.querySelectorAll(".nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  ["platforms", "settings", "security", "status"].forEach(t => document.getElementById("tab-" + t).classList.toggle("hidden", t !== name));
+}
+function setBadge(id, ok, text) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "badge " + (ok ? "ok" : "off");
+}
+async function loadConfigs() {
+  for (const p of ["qq", "telegram"]) {
+    const cfg = await api("/admin/api/config/" + p);
+    const f = cfg.fields;
+    document.getElementById(p + "Enabled").checked = cfg.enabled;
+    setBadge(p + "Badge", cfg.enabled, cfg.enabled ? (cfg.status === "running" ? "运行中" : "已启用") : "未启用");
+    if (p === "qq") {
+      document.getElementById("qqAppId").value = f.app_id || "";
+      document.getElementById("qqAppSecret").value = "";
+      document.getElementById("qqAppSecret").placeholder = f.has_app_secret ? "已保存，留空表示不修改" : "输入 AppSecret";
+      document.getElementById("qqDefaultChat").value = f.default_chat_id || "";
+      document.getElementById("qqScope").value = f.chat_scope || "private";
+    } else {
+      document.getElementById("tgToken").value = "";
+      document.getElementById("tgToken").placeholder = f.has_token ? "已保存，留空表示不修改" : "输入 Bot Token";
+      document.getElementById("tgDefaultChat").value = f.default_chat_id || "";
+    }
+  }
+}
+async function saveConfig(p) {
+  let fields = {};
+  try {
+    if (p === "qq") {
+      fields.app_id = document.getElementById("qqAppId").value.trim();
+      fields.app_secret = document.getElementById("qqAppSecret").value;
+      fields.default_chat_id = document.getElementById("qqDefaultChat").value.trim();
+      fields.chat_scope = document.getElementById("qqScope").value;
+    } else {
+      fields.token = document.getElementById("tgToken").value;
+      fields.default_chat_id = document.getElementById("tgDefaultChat").value.trim();
+    }
+    await api("/admin/api/config/" + p, {method: "PUT", body: JSON.stringify({enabled: document.getElementById(p + "Enabled").checked, fields})});
+    showMsg("msg-" + p, "已保存，适配器已热生效", true);
+  } catch (e) {
+    showMsg("msg-" + p, "保存失败：" + e.message, false);
+    return;
+  }
+  try { await loadConfigs(); } catch (e) { /* 刷新配置失败不影响保存结果 */ }
+}
+async function testConfig(p) {
+  try {
+    const fields = {};
+    if (p === "qq") {
+      fields.app_id = document.getElementById("qqAppId").value.trim();
+      fields.app_secret = document.getElementById("qqAppSecret").value;
+    } else {
+      fields.token = document.getElementById("tgToken").value;
+    }
+    const r = await api("/admin/api/config/" + p + "/test", {method: "POST", body: JSON.stringify({fields})});
+    showMsg("msg-" + p, r.ok ? "连接正常：" + r.message : "连接失败：" + r.message, r.ok);
+  } catch (e) { showMsg("msg-" + p, "测试失败：" + e.message, false); }
+}
+async function loadSettings() {
+  const s = await api("/admin/api/settings");
+  document.getElementById("sTimezone").value = s.timezone || "";
+  document.getElementById("sReminderHours").value = s.reminder_hours || "";
+  document.getElementById("sDedupWindow").value = s.dedup_window_seconds || "";
+  document.getElementById("sPendingTtl").value = s.pending_ttl_seconds || "";
+  document.getElementById("sBackupKeep").value = s.backup_keep_days || "";
+  document.getElementById("sBackupHour").value = s.backup_hour || "";
+  document.getElementById("sReminderMessage").value = s.reminder_message || "";
+}
+async function saveSettings() {
+  try {
+    const updates = {
+      timezone: document.getElementById("sTimezone").value.trim(),
+      reminder_hours: document.getElementById("sReminderHours").value.trim(),
+      reminder_message: document.getElementById("sReminderMessage").value,
+      dedup_window_seconds: document.getElementById("sDedupWindow").value.trim(),
+      pending_ttl_seconds: document.getElementById("sPendingTtl").value.trim(),
+      backup_keep_days: document.getElementById("sBackupKeep").value.trim(),
+      backup_hour: document.getElementById("sBackupHour").value.trim(),
+    };
+    const r = await api("/admin/api/settings", {method: "PUT", body: JSON.stringify({updates})});
+    showMsg("msg-settings", "已保存：" + (r.applied.length ? r.applied.join(", ") : "无变更"), true);
+  } catch (e) { showMsg("msg-settings", "保存失败：" + e.message, false); }
+}
+async function changePassword() {
+  const oldP = document.getElementById("pOld").value, newP = document.getElementById("pNew").value, newP2 = document.getElementById("pNew2").value;
+  if (newP !== newP2) { showMsg("msg-password", "两次输入的新密码不一致", false); return; }
+  try {
+    const r = await api("/admin/api/password", {method: "POST", body: JSON.stringify({old_password: oldP, new_password: newP})});
+    showMsg("msg-password", r.message, true);
+    document.getElementById("pOld").value = document.getElementById("pNew").value = document.getElementById("pNew2").value = "";
+  } catch (e) { showMsg("msg-password", e.message, false); }
+}
+async function loadStatus() {
+  try {
+    const s = await api("/admin/api/status");
+    document.getElementById("statExpenses").textContent = s.expenses;
+    document.getElementById("statImports").textContent = s.imports;
+    document.getElementById("statScheduler").textContent = s.scheduler_running ? "运行中" : "停止";
+    const body = document.getElementById("statusBody");
+    body.innerHTML = "";
+    for (const a of s.adapters) {
+      const tr = document.createElement("tr");
+      const badge = a.running ? '<span class="badge ok">运行中</span>' : '<span class="badge off">停止</span>';
+      tr.innerHTML = "<td>" + a.platform + "</td><td>" + badge + "</td><td>" + (a.last_message_at || "-") + "</td><td>" + (a.last_error || "-") + "</td>";
+      body.appendChild(tr);
+    }
+    const im = await api("/admin/api/imports");
+    const ib = document.getElementById("importsBody");
+    ib.innerHTML = "";
+    for (const r of im.imports) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + r.filename + "</td><td>" + r.file_type + "</td><td>" + r.total_rows + "</td><td>" + r.success_rows + "</td><td>" + r.failed_rows + "</td><td>" + r.created_at + "</td>";
+      ib.appendChild(tr);
+    }
+  } catch (e) { /* 未登录 */ }
+}
+async function backupNow() {
+  try {
+    const r = await api("/admin/api/backup", {method: "POST"});
+    showMsg("msg-backup", "备份完成：" + r.path, true);
+  } catch (e) { showMsg("msg-backup", "备份失败：" + e.message, false); }
+}
+document.getElementById("loginPass").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+api("/admin/api/me").then(loadApp).catch(() => showLogin());
+</script>
+</body>
+</html>

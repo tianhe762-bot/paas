@@ -1,0 +1,15 @@
+services:
+  paas:
+    build: .
+    image: paas:latest
+    container_name: paas
+    restart: unless-stopped
+    # 与宿主机共享网络：容器流量走宿主机的 fake-ip 透明代理（Telegram 等被代理域名可直连）
+    network_mode: host
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      TELEGRAM_PROXY: ${TELEGRAM_PROXY:-}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
