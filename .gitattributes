@@ -1,0 +1,23 @@
+# 所有文本文件统一 LF 换行（含 Windows 检出），防止 autocrlf 破坏服务器脚本
+* text=auto eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+Dockerfile text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+.env.example text eol=lf
+*.db binary
+*.db-wal binary
+*.db-shm binary
+*.xlsx binary
+*.png binary
+*.jpg binary
+*.ico binary
+
