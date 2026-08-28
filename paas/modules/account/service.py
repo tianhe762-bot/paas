@@ -6,6 +6,7 @@ from typing import Any
 from paas import timeutil
 from paas.models import CategoryRow, ImportResult, ParsedItem
 from paas.modules.account.importer import parse_import
+from paas.modules.account.parser import ACCOUNTS, PRESET_BANKS
 from paas.modules.account.queries import day_summary
 
 ZERO_PHRASES = {
@@ -61,7 +62,7 @@ def _upsert_daily_status(conn, namespace: str, user_id: str, day_iso: str, **fla
 
 def save_raw_message(conn, namespace: str, platform: str, message_id: str, user_id: str, content: str) -> None:
     if not content:
-        return
+        content = "[文件消息]"
     conn.execute(
         """
         INSERT OR IGNORE INTO raw_messages (namespace, platform, message_id, user_id, content)
@@ -72,6 +73,161 @@ def save_raw_message(conn, namespace: str, platform: str, message_id: str, user_
 
 
 # ---------- 账户 ----------
+
+def list_account_templates(conn, namespace: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, name, aliases, initial_balance_cents, sort_order "
+        "FROM account_templates WHERE namespace = ? ORDER BY sort_order, id",
+        (namespace,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def replace_account_templates(
+    conn, namespace: str, templates: list[dict]
+) -> tuple[bool, str]:
+    """整表替换该机器人的账户模板，并同步到已有用户。"""
+    existing = {
+        r["name"]: r
+        for r in conn.execute(
+            "SELECT name, aliases, initial_balance_cents, sort_order "
+            "FROM account_templates WHERE namespace = ?",
+            (namespace,),
+        ).fetchall()
+    }
+    wanted = {t["name"]: t for t in templates if t.get("name")}
+    # 被移除且已被流水引用的账户禁止删除
+    removed = [name for name in existing if name not in wanted]
+    if removed:
+        placeholders = ",".join("?" * len(removed))
+        refs = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n FROM expenses e
+            JOIN accounts a ON a.id = e.account_id
+            WHERE e.namespace = ? AND a.name IN ({placeholders})
+            """,
+            (namespace, *removed),
+        ).fetchone()["n"]
+        if refs:
+            return False, f"以下账户已有流水引用，无法删除：{', '.join(removed)}"
+    for name, row in wanted.items():
+        conn.execute(
+            """
+            INSERT INTO account_templates (namespace, name, aliases, initial_balance_cents, sort_order)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(namespace, name) DO UPDATE SET
+                aliases = excluded.aliases,
+                initial_balance_cents = excluded.initial_balance_cents,
+                sort_order = excluded.sort_order
+            """,
+            (
+                namespace,
+                name,
+                row.get("aliases", "") or "",
+                int(row.get("initial_balance_cents", 0) or 0),
+                int(row.get("sort_order", 0) or 0),
+            ),
+        )
+    for name in removed:
+        conn.execute(
+            "DELETE FROM account_templates WHERE namespace = ? AND name = ?",
+            (namespace, name),
+        )
+        conn.execute(
+            "DELETE FROM accounts WHERE namespace = ? AND name = ?",
+            (namespace, name),
+        )
+    _sync_account_templates_to_users(conn, namespace)
+    conn.commit()
+    return True, "已保存"
+
+
+def _sync_account_templates_to_users(conn, namespace: str) -> None:
+    users = [
+        r["user_id"]
+        for r in conn.execute(
+            "SELECT DISTINCT user_id FROM accounts WHERE namespace = ?", (namespace,)
+        ).fetchall()
+    ]
+    for user_id in users:
+        existing = {
+            r["name"]
+            for r in conn.execute(
+                "SELECT name FROM accounts WHERE namespace = ? AND user_id = ?",
+                (namespace, user_id),
+            ).fetchall()
+        }
+        for row in conn.execute(
+            "SELECT name, aliases, initial_balance_cents, sort_order "
+            "FROM account_templates WHERE namespace = ?",
+            (namespace,),
+        ).fetchall():
+            if row["name"] in existing:
+                conn.execute(
+                    "UPDATE accounts SET aliases = ?, sort_order = ? "
+                    "WHERE namespace = ? AND user_id = ? AND name = ?",
+                    (row["aliases"] or "", row["sort_order"] or 0, namespace, user_id, row["name"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO accounts (namespace, user_id, name, aliases, initial_balance_cents, sort_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (namespace, user_id, row["name"], row["aliases"] or "",
+                     row["initial_balance_cents"], row["sort_order"] or 0),
+                )
+
+
+def backfill_preview(
+    conn, namespace: str, user_id: str, keyword: str
+) -> dict:
+    pattern = f"%{keyword}%"
+    rows = conn.execute(
+        """
+        SELECT e.id, e.expense_date, e.amount_cents, e.description
+        FROM expenses e
+        WHERE e.namespace = ? AND e.user_id = ? AND e.account_id IS NULL
+          AND (e.description LIKE ? OR e.raw_text LIKE ?)
+        ORDER BY e.expense_date DESC LIMIT 200
+        """,
+        (namespace, user_id, pattern, pattern),
+    ).fetchall()
+    total = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM expenses e
+        WHERE e.namespace = ? AND e.user_id = ? AND e.account_id IS NULL
+          AND (e.description LIKE ? OR e.raw_text LIKE ?)
+        """,
+        (namespace, user_id, pattern, pattern),
+    ).fetchone()["n"]
+    return {
+        "keyword": keyword,
+        "matched": int(total),
+        "samples": [dict(r) for r in rows[:10]],
+    }
+
+
+def backfill_apply(
+    conn, namespace: str, user_id: str, mappings: list[dict]
+) -> dict:
+    results = []
+    for m in mappings:
+        keyword = (m.get("keyword") or "").strip()
+        account = (m.get("account") or "").strip()
+        if not keyword or not account:
+            continue
+        account_id = get_or_create_account(conn, namespace, user_id, account)
+        pattern = f"%{keyword}%"
+        cur = conn.execute(
+            """
+            UPDATE expenses SET account_id = ?
+            WHERE namespace = ? AND user_id = ? AND account_id IS NULL
+              AND (description LIKE ? OR raw_text LIKE ?)
+            """,
+            (account_id, namespace, user_id, pattern, pattern),
+        )
+        results.append({"keyword": keyword, "account": account, "applied": cur.rowcount})
+    conn.commit()
+    return {"results": results}
 
 def ensure_default_accounts(conn, namespace: str, user_id: str) -> None:
     existing = {
@@ -88,7 +244,33 @@ def ensure_default_accounts(conn, namespace: str, user_id: str) -> None:
                 "VALUES (?, ?, ?, 0, ?)",
                 (namespace, user_id, name, idx),
             )
+    for row in conn.execute(
+        "SELECT name, aliases, initial_balance_cents, sort_order FROM account_templates WHERE namespace = ?",
+        (namespace,),
+    ).fetchall():
+        if row["name"] not in existing:
+            conn.execute(
+                "INSERT INTO accounts (namespace, user_id, name, aliases, initial_balance_cents, sort_order) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (namespace, user_id, row["name"], row["aliases"] or "", row["initial_balance_cents"], row["sort_order"] or 0),
+            )
     conn.commit()
+
+
+def account_keywords(conn, namespace: str, user_id: str) -> list[tuple[str, list[str]]]:
+    """该用户的账户匹配清单：自定义账户（名称+别名）+ 默认账户 + 预置银行。"""
+    out: list[tuple[str, list[str]]] = []
+    for r in conn.execute(
+        "SELECT name, aliases FROM accounts WHERE namespace = ? AND user_id = ? ORDER BY sort_order, id",
+        (namespace, user_id),
+    ).fetchall():
+        kws = [r["name"]] + [a for a in (r["aliases"] or "").split(",") if a]
+        out.append((r["name"], kws))
+    names = {n for n, _ in out}
+    for name, kws in list(ACCOUNTS) + list(PRESET_BANKS):
+        if name not in names:
+            out.append((name, kws))
+    return out
 
 
 def get_or_create_account(conn, namespace: str, user_id: str, name: str) -> int | None:
@@ -464,6 +646,173 @@ def modify_record(
 
 
 # ---------- 导入 ----------
+
+def create_import_staging(
+    conn, namespace: str, user_id: str, platform: str, message_id: str,
+    filename: str, items: list[ParsedItem],
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO import_staging (namespace, user_id, platform, message_id, filename, data_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            namespace, user_id, platform, message_id, filename,
+            json.dumps([it.model_dump(mode="json") for it in items], ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_import_staging(conn, staging_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM import_staging WHERE id = ?", (staging_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_import_staging(conn, staging_id: int) -> None:
+    conn.execute("DELETE FROM import_staging WHERE id = ?", (staging_id,))
+    conn.commit()
+
+
+def _item_dedup_key(item: ParsedItem) -> tuple:
+    return (
+        item.expense_date.isoformat(),
+        item.amount_cents,
+        item.description,
+        item.tx_type,
+        item.account_name or "",
+    )
+
+
+def _existing_item(conn, namespace: str, user_id: str, item: ParsedItem) -> bool:
+    account_row = (
+        conn.execute(
+            "SELECT id FROM accounts WHERE namespace = ? AND user_id = ? AND name = ?",
+            (namespace, user_id, item.account_name),
+        ).fetchone()
+        if item.account_name
+        else None
+    )
+    row = conn.execute(
+        """
+        SELECT id FROM expenses
+        WHERE namespace = ? AND user_id = ? AND expense_date = ?
+          AND amount_cents = ? AND description = ? AND tx_type = ? AND (account_id IS ?)
+        LIMIT 1
+        """,
+        (
+            namespace, user_id, item.expense_date.isoformat(),
+            item.amount_cents, item.description, item.tx_type,
+            account_row["id"] if account_row else None,
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def preview_merge(conn, namespace: str, user_id: str, items: list[ParsedItem]) -> dict:
+    seen: set[tuple] = set()
+    new_count = 0
+    skip_count = 0
+    dates: list[str] = []
+    expense_cents = 0
+    income_cents = 0
+    categories: dict[str, int] = {}
+    for it in items:
+        key = _item_dedup_key(it)
+        if key in seen or _existing_item(conn, namespace, user_id, it):
+            skip_count += 1
+            continue
+        seen.add(key)
+        new_count += 1
+        dates.append(it.expense_date.isoformat())
+        if it.tx_type in ("expense", "fee"):
+            expense_cents += it.amount_cents
+        elif it.tx_type in ("income", "refund"):
+            income_cents += it.amount_cents
+        categories[it.category_name] = categories.get(it.category_name, 0) + 1
+    return {
+        "total": len(items),
+        "new": new_count,
+        "skip": skip_count,
+        "date_min": min(dates) if dates else "",
+        "date_max": max(dates) if dates else "",
+        "expense_cents": expense_cents,
+        "income_cents": income_cents,
+        "categories": sorted(categories.items(), key=lambda kv: -kv[1])[:5],
+    }
+
+
+def merge_staged(
+    conn, staging_id: int, namespace: str, user_id: str, platform: str,
+) -> dict:
+    staging = get_import_staging(conn, staging_id)
+    if staging is None:
+        return {"new": 0, "skip": 0, "errors": ["暂存数据不存在或已过期"]}
+    items = [ParsedItem.model_validate(it) for it in json.loads(staging["data_json"])]
+    ensure_default_accounts(conn, namespace, user_id)
+    seen: set[tuple] = set()
+    new_count = 0
+    skip_count = 0
+    row_errors: list[str] = []
+    for idx, item in enumerate(items):
+        mid = f"import:{platform}:{staging['message_id']}:{idx}"
+        key = _item_dedup_key(item)
+        if key in seen or _existing_item(conn, namespace, user_id, item):
+            skip_count += 1
+            continue
+        seen.add(key)
+        account_id = (
+            get_or_create_account(conn, namespace, user_id, item.account_name)
+            if item.account_name
+            else None
+        )
+        try:
+            conn.execute(
+                """
+                INSERT INTO expenses
+                    (namespace, user_id, expense_date, category_id, account_id,
+                     tx_type, amount_cents, description, platform, message_id, raw_text, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal')
+                """,
+                (
+                    namespace, user_id, item.expense_date.isoformat(), item.category_id, account_id,
+                    item.tx_type, item.amount_cents, item.description,
+                    platform, mid, f"导入:{staging['filename']}",
+                ),
+            )
+            new_count += 1
+        except sqlite3.IntegrityError:
+            skip_count += 1
+            row_errors.append(f"第{idx + 1}行重复，已跳过")
+    conn.execute(
+        """
+        INSERT INTO imports
+            (namespace, user_id, platform, message_id, filename, file_type,
+             total_rows, success_rows, failed_rows, errors)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            namespace, user_id, platform, staging["message_id"], staging["filename"],
+            "xlsx" if staging["filename"].lower().endswith((".xlsx", ".xls")) else "csv",
+            len(items), new_count, skip_count,
+            "\n".join(row_errors[:50]),
+        ),
+    )
+    delete_import_staging(conn, staging_id)
+    conn.commit()
+    return {"new": new_count, "skip": skip_count, "errors": row_errors}
+
+
+def cleanup_stale_staging(conn) -> int:
+    cur = conn.execute(
+        "DELETE FROM import_staging WHERE created_at < datetime('now', '-1 day')"
+    )
+    conn.commit()
+    return cur.rowcount
+
 
 def import_file(
     conn,

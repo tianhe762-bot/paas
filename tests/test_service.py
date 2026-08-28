@@ -157,3 +157,81 @@ def test_import_csv_roundtrip(conn):
     result2, _ = s.import_file(conn, "default", "u1", "qq", "imp1", "ledger.csv", data)
     assert result2.success_rows == 0
     assert result2.failed_rows == 2
+
+
+def test_account_templates_init_and_sync(conn):
+    ok, _ = s.replace_account_templates(
+        conn, "ns1",
+        [{"name": "建行卡", "aliases": "建行,龙卡", "initial_balance_cents": 100000, "sort_order": 0}],
+    )
+    assert ok
+    # 新用户首触时自动创建模板账户
+    s.ensure_default_accounts(conn, "ns1", "u_new")
+    row = conn.execute(
+        "SELECT * FROM accounts WHERE namespace='ns1' AND user_id='u_new' AND name='建行卡'"
+    ).fetchone()
+    assert row is not None
+    assert row["aliases"] == "建行,龙卡"
+    assert row["initial_balance_cents"] == 100000
+    # 模板改名同步到已有用户
+    ok, _ = s.replace_account_templates(
+        conn, "ns1",
+        [{"name": "建行储蓄卡", "aliases": "建行", "initial_balance_cents": 0, "sort_order": 0}],
+    )
+    assert ok
+    renamed = conn.execute(
+        "SELECT * FROM accounts WHERE namespace='ns1' AND user_id='u_new' AND name='建行储蓄卡'"
+    ).fetchone()
+    assert renamed is not None
+    assert renamed["aliases"] == "建行"
+
+
+def test_backfill(conn):
+    from paas.models import ParsedItem
+
+    item = ParsedItem(
+        expense_date=datetime.date(2025, 7, 1),
+        category_id=1, category_name="餐饮", category_icon="🍜",
+        account_name="", tx_type="expense", amount_cents=2500, description="建行消费",
+    )
+    s.record_items(conn, "default", "u_bf", [item], "qq", "bf1", "原始消息含建行")
+    preview = s.backfill_preview(conn, "default", "u_bf", "建行")
+    assert preview["matched"] == 1
+    res = s.backfill_apply(
+        conn, "default", "u_bf", [{"keyword": "建行", "account": "建行卡"}]
+    )
+    assert res["results"][0]["applied"] == 1
+    row = conn.execute(
+        "SELECT account_id FROM expenses WHERE user_id='u_bf'"
+    ).fetchone()
+    acc = conn.execute("SELECT id FROM accounts WHERE name='建行卡'").fetchone()
+    assert row["account_id"] == acc["id"]
+    # 已关联流水不再被回填
+    res2 = s.backfill_apply(conn, "default", "u_bf", [{"keyword": "建行", "account": "建行卡"}])
+    assert res2["results"][0]["applied"] == 0
+
+
+def test_import_staging_merge_dedup(conn):
+    from paas.models import ParsedItem
+
+    items = [
+        ParsedItem(
+            expense_date=datetime.date(2026, 8, 1), category_id=1,
+            category_name="餐饮", category_icon="🍜", account_name="微信",
+            tx_type="expense", amount_cents=8650, description="吃火锅",
+        ),
+        ParsedItem(
+            expense_date=datetime.date(2026, 8, 2), category_id=2,
+            category_name="交通", category_icon="🚕", account_name="微信",
+            tx_type="expense", amount_cents=2300, description="打车",
+        ),
+    ]
+    preview = s.preview_merge(conn, "default", "u_st", items)
+    assert preview["new"] == 2 and preview["skip"] == 0
+    sid = s.create_import_staging(conn, "default", "u_st", "qq", "st1", "a.csv", items)
+    result = s.merge_staged(conn, sid, "default", "u_st", "qq")
+    assert result["new"] == 2 and result["skip"] == 0
+    # 再合并同内容 → 全部跳过（去重）
+    sid2 = s.create_import_staging(conn, "default", "u_st", "qq", "st2", "a.csv", items)
+    result2 = s.merge_staged(conn, sid2, "default", "u_st", "qq")
+    assert result2["new"] == 0 and result2["skip"] == 2

@@ -123,6 +123,9 @@ class SchedulerManager:
     async def _backup_job(self) -> None:
         conn = connect()
         try:
+            from paas.modules.account.service import cleanup_stale_staging
+
+            cleanup_stale_staging(conn)
             keep_days = settings_store.get_int(conn, "backup_keep_days", 30)
             target = execute_safe_backup(conn)
             removed = prune_backups(keep_days=keep_days)

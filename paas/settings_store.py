@@ -9,6 +9,11 @@ DEFAULTS: dict[str, str] = {
     "amount_rounding": "2",
     "backup_keep_days": "30",
     "backup_hour": "3",
+    "ai_mode": "off",
+    "ai_model": "qwen2.5:0.5b",
+    "ai_base_url": "",
+    "ai_api_key": "",
+    "ai_timeout_seconds": "45",
 }
 
 

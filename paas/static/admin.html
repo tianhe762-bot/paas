@@ -94,6 +94,35 @@
       <div id="botsList"></div>
     </div>
 
+    <div class="card hidden" id="accountsPanel">
+      <div class="flex"><h2 style="margin:0" id="accountsTitle">账户管理</h2><button class="btn-ghost btn-sm" onclick="closeAccounts()">收起</button></div>
+      <p class="muted">账户模板会应用到该机器人的所有用户；新用户首次接触时自动创建。删除已被流水引用的账户会被拒绝。</p>
+      <div id="accountsList"></div>
+      <div class="row" style="margin-top:10px">
+        <div><label>账户名</label><input id="acName" placeholder="例如：建行卡"></div>
+        <div><label>识别别名（逗号分隔）</label><input id="acAliases" placeholder="例如：建行,龙卡"></div>
+        <div><label>初始余额（元）</label><input id="acInitial" placeholder="0"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn-ghost" onclick="addAccountRow()">添加到列表</button></div>
+      </div>
+      <div style="margin-top:12px">
+        <button class="btn-primary" onclick="saveAccounts()">保存账户列表</button>
+        <span class="msg" id="msg-accounts"></span>
+      </div>
+      <hr style="border-color:var(--line);margin:18px 0">
+      <h2 style="font-size:15px">历史流水回填（仅未关联账户的流水）</h2>
+      <div class="row">
+        <div><label>用户</label><select id="bfUser"></select></div>
+        <div><label>关键词</label><input id="bfKeyword" placeholder="例如：建行"></div>
+        <div><label>归入账户</label><input id="bfAccount" placeholder="例如：建行卡"></div>
+      </div>
+      <div style="margin-top:12px">
+        <button class="btn-ghost" onclick="backfillPreview()">预览</button>
+        <button class="btn-primary" onclick="backfillApply()">应用回填</button>
+        <span class="msg" id="msg-backfill"></span>
+      </div>
+      <div id="backfillResult" class="muted" style="margin-top:10px"></div>
+    </div>
+
     <div class="card hidden" id="botForm">
       <div class="flex"><h2 style="margin:0" id="botFormTitle">添加机器人</h2><button class="btn-ghost btn-sm" onclick="closeBotForm()">收起</button></div>
       <div class="row">
@@ -148,6 +177,32 @@
       <textarea id="sReminderMessage"></textarea>
       <div style="margin-top:14px"><button class="btn-primary" onclick="saveSettings()">保存设置</button><span class="msg" id="msg-settings"></span></div>
     </div>
+    <div class="card">
+      <h2>AI 识别（可选，默认关闭）</h2>
+      <p class="muted">开启后可在聊天里发「用AI：今天微信吃饭花了25」手动调用；AI 结果仍会经过校验、缺信息询问与防重。</p>
+      <div class="row">
+        <div><label>模式</label>
+          <select id="aiMode">
+            <option value="off">不启用</option>
+            <option value="ollama">本地模型（Ollama）</option>
+            <option value="cloud">云端 API</option>
+          </select>
+        </div>
+        <div><label>模型</label><input id="aiModel" placeholder="qwen2.5:0.5b 或云端模型名"></div>
+        <div><label>接口地址</label><input id="aiBaseUrl" placeholder="云端 base_url，如 https://api.deepseek.com/v1；Ollama 默认 http://localhost:11434"></div>
+      </div>
+      <div class="row">
+        <div><label>API Key（云端，留空不改）</label><input id="aiApiKey" type="password"></div>
+        <div><label>超时（秒）</label><input id="aiTimeout" placeholder="45"></div>
+      </div>
+      <div style="margin-top:12px">
+        <button class="btn-primary" onclick="saveAi()">保存 AI 设置</button>
+        <button class="btn-ghost" onclick="aiStatus()">查看状态</button>
+        <button class="btn-ghost" onclick="aiPull()">拉取本地模型</button>
+        <span class="msg" id="msg-ai"></span>
+      </div>
+      <div id="aiStatusResult" class="muted" style="margin-top:10px"></div>
+    </div>
   </div>
 
   <div id="tab-security" class="hidden">
@@ -175,6 +230,10 @@
     <div class="card">
       <h2>最近导入记录</h2>
       <table><thead><tr><th>文件名</th><th>类型</th><th>总数</th><th>成功</th><th>失败</th><th>时间</th></tr></thead><tbody id="importsBody"></tbody></table>
+    </div>
+    <div class="card">
+      <h2>最近对话</h2>
+      <table><thead><tr><th>时间</th><th>命名空间</th><th>用户消息</th><th>机器人回复</th></tr></thead><tbody id="convBody"></tbody></table>
     </div>
   </div>
 </div>
@@ -257,7 +316,8 @@ async function loadBots() {
       const pname = b.platform === "qq" ? "QQ" : "Telegram";
       card.innerHTML =
         '<div class="bot-head"><div><strong>' + esc(b.name || b.bot_id) + '</strong> <span class="tag">' + pname + '</span> <span class="tag">' + esc(b.bot_id) + '</span> ' + st + '</div>' +
-        '<div><button class="btn-ghost btn-sm" onclick="openBotEdit(\'' + b.bot_id + '\')">编辑</button></div></div>';
+        '<div><button class="btn-ghost btn-sm" onclick="openBotEdit(\'' + b.bot_id + '\')">编辑</button> ' +
+        '<button class="btn-ghost btn-sm" onclick="openAccounts(\'' + b.bot_id + '\')">账户</button></div></div>';
       if (b.last_error) card.innerHTML += '<p class="muted" style="color:var(--err)">' + esc(b.last_error) + '</p>';
       list.appendChild(card);
     }
@@ -408,6 +468,45 @@ async function loadSettings() {
   document.getElementById("sBackupKeep").value = s.backup_keep_days || "";
   document.getElementById("sBackupHour").value = s.backup_hour || "";
   document.getElementById("sReminderMessage").value = s.reminder_message || "";
+  await loadAi();
+}
+async function loadAi() {
+  try {
+    const a = await api("/admin/api/ai");
+    document.getElementById("aiMode").value = a.mode || "off";
+    document.getElementById("aiModel").value = a.model || "qwen2.5:0.5b";
+    document.getElementById("aiBaseUrl").value = a.base_url || "";
+    document.getElementById("aiTimeout").value = a.timeout_seconds || "45";
+    document.getElementById("aiApiKey").value = "";
+    document.getElementById("aiApiKey").placeholder = a.has_api_key ? "已保存，留空不改" : "输入 API Key";
+  } catch (e) { /* 忽略 */ }
+}
+async function saveAi() {
+  try {
+    const r = await api("/admin/api/ai", {method: "PUT", body: JSON.stringify({
+      mode: document.getElementById("aiMode").value,
+      model: document.getElementById("aiModel").value.trim(),
+      base_url: document.getElementById("aiBaseUrl").value.trim(),
+      api_key: document.getElementById("aiApiKey").value,
+      timeout_seconds: document.getElementById("aiTimeout").value.trim() || "45",
+    })});
+    showMsg("msg-ai", "已保存：" + (r.applied.length ? r.applied.join(", ") : "无变更"), true);
+  } catch (e) { showMsg("msg-ai", "保存失败：" + e.message, false); }
+}
+async function aiStatus() {
+  try {
+    const r = await api("/admin/api/ai/status", {method: "POST"});
+    document.getElementById("aiStatusResult").textContent = r.ok
+      ? "Ollama 在线，已安装模型：" + (r.models && r.models.length ? r.models.join(", ") : "无")
+      : "Ollama 不可达：" + (r.error || "");
+  } catch (e) { showMsg("msg-ai", "查询失败：" + e.message, false); }
+}
+async function aiPull() {
+  try {
+    const model = document.getElementById("aiModel").value.trim() || "qwen2.5:0.5b";
+    const r = await api("/admin/api/ai/pull", {method: "POST", body: JSON.stringify({model})});
+    document.getElementById("aiStatusResult").textContent = r.message;
+  } catch (e) { showMsg("msg-ai", "拉取失败：" + e.message, false); }
 }
 async function saveSettings() {
   try {
@@ -457,6 +556,14 @@ async function loadStatus() {
       tr.innerHTML = "<td>" + esc(r.filename) + "</td><td>" + r.file_type + "</td><td>" + r.total_rows + "</td><td>" + r.success_rows + "</td><td>" + r.failed_rows + "</td><td>" + r.created_at + "</td>";
       ib.appendChild(tr);
     }
+    const cv = await api("/admin/api/conversations?limit=30");
+    const cb = document.getElementById("convBody");
+    cb.innerHTML = "";
+    for (const c of cv.conversations) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + c.created_at + "</td><td>" + esc(c.namespace) + "</td><td>" + esc((c.content || "").slice(0, 60)) + "</td><td>" + esc((c.reply || "").slice(0, 60)) + "</td>";
+      cb.appendChild(tr);
+    }
   } catch (e) { /* 未登录 */ }
 }
 async function backupNow() {
@@ -467,9 +574,97 @@ async function backupNow() {
 }
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
+// ---------- 账户管理 / 回填 ----------
+let accountsBotId = null;
+let accountsRows = [];
+
+async function openAccounts(botId) {
+  accountsBotId = botId;
+  accountsRows = [];
+  document.getElementById("accountsTitle").textContent = "账户管理：" + botId;
+  document.getElementById("accountsPanel").classList.remove("hidden");
+  await loadAccounts();
+}
+function closeAccounts() { document.getElementById("accountsPanel").classList.add("hidden"); }
+async function loadAccounts() {
+  try {
+    const d = await api("/admin/api/bots/" + accountsBotId + "/accounts");
+    accountsRows = (d.templates || []).map(t => ({name: t.name, aliases: t.aliases || "", initial: t.initial_balance_cents / 100}));
+    const usersSel = document.getElementById("bfUser");
+    usersSel.innerHTML = "";
+    for (const u of (d.users || [])) {
+      const o = document.createElement("option");
+      o.value = u; o.textContent = u;
+      usersSel.appendChild(o);
+    }
+    renderAccounts();
+  } catch (e) { showMsg("msg-accounts", "加载失败：" + e.message, false); }
+}
+function renderAccounts() {
+  const box = document.getElementById("accountsList");
+  box.innerHTML = "";
+  for (const [i, t] of accountsRows.entries()) {
+    const div = document.createElement("div");
+    div.className = "row";
+    div.style.marginBottom = "8px";
+    div.innerHTML =
+      '<div><input id="ar_name_' + i + '" value="' + esc(t.name) + '" placeholder="账户名"></div>' +
+      '<div><input id="ar_aliases_' + i + '" value="' + esc(t.aliases) + '" placeholder="别名"></div>' +
+      '<div><input id="ar_initial_' + i + '" value="' + esc(t.initial) + '" placeholder="初始余额"></div>' +
+      '<div style="display:flex;align-items:center"><button class="btn-danger btn-sm" onclick="removeAccountRow(' + i + ')">删除</button></div>';
+    box.appendChild(div);
+  }
+  if (!accountsRows.length) box.innerHTML = '<p class="muted">暂无自定义账户。</p>';
+}
+function addAccountRow() {
+  accountsRows.push({
+    name: document.getElementById("acName").value.trim(),
+    aliases: document.getElementById("acAliases").value.trim(),
+    initial: document.getElementById("acInitial").value.trim() || "0",
+  });
+  document.getElementById("acName").value = "";
+  document.getElementById("acAliases").value = "";
+  document.getElementById("acInitial").value = "";
+  renderAccounts();
+}
+function removeAccountRow(i) { accountsRows.splice(i, 1); renderAccounts(); }
+async function saveAccounts() {
+  try {
+    const templates = accountsRows.map((_, i) => ({
+      name: document.getElementById("ar_name_" + i).value.trim(),
+      aliases: document.getElementById("ar_aliases_" + i).value.trim(),
+      initial_balance_cents: Math.round(parseFloat(document.getElementById("ar_initial_" + i).value || "0") * 100),
+    })).filter(t => t.name);
+    const r = await api("/admin/api/bots/" + accountsBotId + "/accounts", {method: "PUT", body: JSON.stringify({templates})});
+    showMsg("msg-accounts", r.message || "已保存", true);
+    await loadAccounts();
+  } catch (e) { showMsg("msg-accounts", "保存失败：" + e.message, false); }
+}
+async function backfillPreview() {
+  const user = document.getElementById("bfUser").value;
+  const keyword = document.getElementById("bfKeyword").value.trim();
+  if (!user || !keyword) { showMsg("msg-backfill", "请选择用户并填写关键词", false); return; }
+  try {
+    const r = await api("/admin/api/backfill/preview?namespace=" + accountsBotId + "&user_id=" + encodeURIComponent(user) + "&keyword=" + encodeURIComponent(keyword));
+    const samples = (r.samples || []).slice(0, 5).map(s => s.expense_date + " " + (s.amount_cents / 100).toFixed(2) + "元 " + (s.description || "")).join("<br>");
+    document.getElementById("backfillResult").innerHTML = "命中 <b>" + r.matched + "</b> 行。<br>样例：<br>" + (samples || "无");
+  } catch (e) { showMsg("msg-backfill", "预览失败：" + e.message, false); }
+}
+async function backfillApply() {
+  const user = document.getElementById("bfUser").value;
+  const keyword = document.getElementById("bfKeyword").value.trim();
+  const account = document.getElementById("bfAccount").value.trim();
+  if (!user || !keyword || !account) { showMsg("msg-backfill", "请填写用户、关键词与目标账户", false); return; }
+  if (!confirm("确认按关键词「" + keyword + "」把未关联账户的流水归入「" + account + "」？")) return;
+  try {
+    const r = await api("/admin/api/backfill/apply", {method: "POST", body: JSON.stringify({namespace: accountsBotId, user_id: user, mappings: [{keyword, account}]})});
+    const res = (r.results || []).map(x => x.keyword + "→" + x.account + "：" + x.applied + " 行").join("<br>");
+    document.getElementById("backfillResult").innerHTML = res || "无结果";
+  } catch (e) { showMsg("msg-backfill", "应用失败：" + e.message, false); }
+}
+
 document.getElementById("loginPass").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
 api("/admin/api/me").then(loadApp).catch(() => showLogin());
 </script>
 </body>
 </html>
-

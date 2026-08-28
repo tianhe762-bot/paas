@@ -14,8 +14,26 @@ ACCOUNTS: list[tuple[str, list[str]]] = [
     ("微信", ["微信", "wechat", "wx"]),
     ("支付宝", ["支付宝", "余额宝", "alipay"]),
     ("信用卡", ["信用卡", "花呗", "白条"]),
-    ("银行卡", ["银行卡", "储蓄卡", "银行", "建行", "工行", "招行", "农行"]),
+    ("银行卡", ["银行卡", "储蓄卡"]),
     ("现金", ["现金", "现钞", "钱包"]),
+]
+
+PRESET_BANKS: list[tuple[str, list[str]]] = [
+    ("建行卡", ["建行", "建设银行", "龙卡"]),
+    ("招行卡", ["招行", "招商银行", "一卡通"]),
+    ("工行卡", ["工行", "工商银行"]),
+    ("农行卡", ["农行", "农业银行"]),
+    ("中行卡", ["中行", "中国银行"]),
+    ("交行卡", ["交行", "交通银行"]),
+    ("邮储卡", ["邮储", "邮政储蓄"]),
+    ("光大卡", ["光大"]),
+    ("中信卡", ["中信"]),
+    ("民生卡", ["民生"]),
+    ("浦发卡", ["浦发"]),
+    ("兴业卡", ["兴业"]),
+    ("平安卡", ["平安"]),
+    ("广发卡", ["广发"]),
+    ("华夏卡", ["华夏"]),
 ]
 
 TRANSFER_RE = re.compile(
@@ -30,7 +48,10 @@ REFUND_RE = re.compile(r"退款|退钱|退回|退回来")
 
 TIME_WORD_RE = re.compile(
     r"今天|昨天|前天|大前天|今早|今晚|今午|"
-    r"\d{1,2}\s*月\s*\d{1,2}\s*[日号]?|\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]?"
+    r"\d{1,2}\s*月\s*\d{1,2}\s*[日号]?"
+    r"|\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]?"
+    r"|\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]?"
+    r"|\d{2}\s*年"
 )
 
 AMOUNT_RE = re.compile(
@@ -39,7 +60,9 @@ AMOUNT_RE = re.compile(
 )
 COLLOQ_BLOCK_RE = re.compile(r"(\d+)\s*块\s*([0-9零一二两三四五六七八九十])")
 DATE_STRIP_RE = re.compile(
-    r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]?|\d{1,2}\s*月\s*\d{1,2}\s*[日号]?"
+    r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]?"
+    r"|\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]?"
+    r"|\d{1,2}\s*月\s*\d{1,2}\s*[日号]?"
 )
 FILLER_AFTER = "下点些次个天杯份口"
 
@@ -171,18 +194,24 @@ def parse_amount_with_unit(text: str) -> Optional[int]:
     return yuan_to_cents(amount) if amount else None
 
 
-def detect_accounts(clause: str) -> list[str]:
-    found: list[tuple[int, str]] = []
-    for name, keywords in ACCOUNTS:
-        pos = -1
+def detect_accounts(
+    clause: str, account_list: Optional[list[tuple[str, list[str]]]] = None
+) -> list[str]:
+    """按句子位置 + 关键词长度匹配账户（支持自定义名称与别名）。"""
+    if account_list is None:
+        account_list = list(ACCOUNTS) + list(PRESET_BANKS)
+    best: dict[str, tuple[int, int]] = {}
+    for name, keywords in account_list:
         for kw in keywords:
-            p = clause.find(kw)
-            if p != -1 and (pos == -1 or p < pos):
-                pos = p
-        if pos != -1 and name not in (n for _, n in found):
-            found.append((pos, name))
-    found.sort(key=lambda x: x[0])
-    return [name for _, name in found]
+            if not kw:
+                continue
+            pos = clause.find(kw)
+            if pos != -1:
+                cur = best.get(name)
+                if cur is None or (pos, -len(kw)) < cur:
+                    best[name] = (pos, -len(kw))
+    ordered = sorted(best.items(), key=lambda kv: (kv[1][0], kv[1][1]))
+    return [name for name, _ in ordered]
 
 
 def detect_tx_type(clause: str) -> str:
@@ -208,6 +237,18 @@ def parse_expense_date(clause: str, base_date: datetime.date) -> datetime.date:
     m = YEAR_MONTH_DAY_RE.search(clause)
     if m:
         return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.search(r"(\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?", clause)
+    if m:
+        try:
+            return datetime.date(2000 + int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return base_date
+    m = re.search(r"(\d{2})\s*年\s*(\d{1,2})\s*月", clause)
+    if m:
+        try:
+            return datetime.date(2000 + int(m.group(1)), int(m.group(2)), 1)
+        except ValueError:
+            return base_date
     m = MONTH_DAY_RE.search(clause)
     if m:
         try:
@@ -248,9 +289,10 @@ def parse_expenses(
     text: str,
     categories: list[CategoryRow],
     base_date: datetime.date,
+    account_list: Optional[list[tuple[str, list[str]]]] = None,
 ) -> list[ParsedItem]:
     items: list[ParsedItem] = []
-    global_accounts = detect_accounts(text)
+    global_accounts = detect_accounts(text, account_list)
     global_date = parse_expense_date(text, base_date)
     for clause in split_clauses(text):
         amount_cents = parse_amount_cents(clause)
@@ -258,7 +300,7 @@ def parse_expenses(
             continue
         cat = match_category(clause, categories)
         desc = clean_description(clause) or cat.name
-        accounts = detect_accounts(clause)
+        accounts = detect_accounts(clause, account_list)
         if not accounts:
             accounts = global_accounts  # 跨子句推断：如"花了86块5元，微信支付"
         tx_type = detect_tx_type(clause)
@@ -387,6 +429,15 @@ def parse_time_range(text: str, base: datetime.date) -> Optional[tuple[datetime.
     m = re.search(r"(\d{4})\s*年", text)
     if m and not re.search(r"\d{1,2}\s*月", text):
         year = int(m.group(1))
+        return datetime.date(year, 1, 1), datetime.date(year, 12, 31)
+
+    # 25年7月 / 23年（缩写年份，按 2000+）
+    m = re.search(r"(\d{2})\s*年\s*(\d{1,2})\s*月(?:份)?", text)
+    if m:
+        return _month_range(2000 + int(m.group(1)), int(m.group(2)), base)
+    m = re.search(r"(\d{2})\s*年", text)
+    if m and not re.search(r"\d{1,2}\s*月", text):
+        year = 2000 + int(m.group(1))
         return datetime.date(year, 1, 1), datetime.date(year, 12, 31)
 
     m = re.search(

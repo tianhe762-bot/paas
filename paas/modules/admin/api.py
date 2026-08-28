@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from paas.db import connect
 from paas.modules.admin import service as admin_service
+from paas.modules.account import service as account_service
 
 router = APIRouter()
 
@@ -47,6 +48,24 @@ class UserBody(BaseModel):
     username: str
     password: str
     role: str = "user"
+
+
+class AccountsBody(BaseModel):
+    templates: list[dict[str, Any]] = []
+
+
+class AiBody(BaseModel):
+    mode: str = "off"
+    model: str = "qwen2.5:0.5b"
+    base_url: str = ""
+    api_key: str = ""
+    timeout_seconds: str = "45"
+
+
+class BackfillBody(BaseModel):
+    namespace: str = "default"
+    user_id: str
+    mappings: list[dict[str, str]] = []
 
 
 def _require_session(request: Request) -> str:
@@ -239,6 +258,133 @@ def delete_user(request: Request, user_id: int) -> dict:
     return {"ok": True}
 
 
+@router.get("/bots/{bot_id}/accounts")
+def bot_accounts(request: Request, bot_id: str) -> dict:
+    _require_session(request)
+    conn = connect()
+    try:
+        return {"templates": admin_service.list_account_templates(conn, bot_id),
+                "users": admin_service.bot_users(conn, bot_id)}
+    finally:
+        conn.close()
+
+
+@router.put("/bots/{bot_id}/accounts")
+def put_bot_accounts(request: Request, bot_id: str, body: AccountsBody) -> dict:
+    _require_session(request)
+    conn = connect()
+    try:
+        ok, msg = admin_service.replace_account_templates(conn, bot_id, body.templates)
+        if not ok:
+            raise HTTPException(status_code=400, detail=msg)
+    finally:
+        conn.close()
+    return {"ok": True, "message": msg}
+
+
+# ---------- AI ----------
+
+@router.get("/ai")
+def get_ai(request: Request) -> dict:
+    _require_session(request)
+    conn = connect()
+    try:
+        return admin_service.get_ai_settings(conn)
+    finally:
+        conn.close()
+
+
+@router.put("/ai")
+def put_ai(request: Request, body: AiBody) -> dict:
+    _require_session(request)
+    if body.mode not in ("off", "ollama", "cloud"):
+        raise HTTPException(status_code=400, detail="mode 必须是 off/ollama/cloud")
+    conn = connect()
+    try:
+        applied = admin_service.put_ai_settings(
+            conn,
+            {
+                "ai_mode": body.mode,
+                "ai_model": body.model,
+                "ai_base_url": body.base_url,
+                "ai_api_key": body.api_key,
+                "ai_timeout_seconds": body.timeout_seconds,
+            },
+        )
+    finally:
+        conn.close()
+    return {"ok": True, "applied": applied}
+
+
+@router.post("/ai/status")
+async def ai_status(request: Request) -> dict:
+    _require_session(request)
+    from paas.interpreter.core import ollama_status
+
+    conn = connect()
+    try:
+        base = admin_service.get_ai_settings(conn).get("base_url") or "http://localhost:11434"
+    finally:
+        conn.close()
+    return await ollama_status(base)
+
+
+@router.post("/ai/pull")
+async def ai_pull(request: Request, body: dict | None = None) -> dict:
+    _require_session(request)
+    from paas.interpreter.core import ollama_pull
+
+    model = (body or {}).get("model") or "qwen2.5:0.5b"
+    conn = connect()
+    try:
+        base = admin_service.get_ai_settings(conn).get("base_url") or "http://localhost:11434"
+    finally:
+        conn.close()
+    ok, msg = await ollama_pull(model, base)
+    return {"ok": ok, "message": msg}
+
+
+# ---------- 最近对话 / 回填 ----------
+
+@router.get("/conversations")
+def conversations(request: Request, limit: int = 50) -> dict:
+    _require_session(request)
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, namespace, platform, message_id, user_id, content, reply, created_at
+            FROM raw_messages ORDER BY id DESC LIMIT ?
+            """,
+            (min(max(limit, 1), 200),),
+        ).fetchall()
+        return {"conversations": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@router.get("/backfill/preview")
+def backfill_preview(request: Request, namespace: str = "default", user_id: str = "", keyword: str = "") -> dict:
+    _require_session(request)
+    if not user_id or not keyword:
+        raise HTTPException(status_code=400, detail="缺少 user_id 或 keyword")
+    conn = connect()
+    try:
+        return account_service.backfill_preview(conn, namespace, user_id, keyword)
+    finally:
+        conn.close()
+
+
+@router.post("/backfill/apply")
+def backfill_apply(request: Request, body: BackfillBody) -> dict:
+    _require_session(request)
+    conn = connect()
+    try:
+        return account_service.backfill_apply(conn, body.namespace, body.user_id, body.mappings)
+    finally:
+        conn.close()
+
+
 # ---------- 状态 / 设置 / 备份 / 导入导出 ----------
 
 @router.get("/status")
@@ -411,4 +557,3 @@ def export_ledger(
         )
     finally:
         conn.close()
-

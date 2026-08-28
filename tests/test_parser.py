@@ -130,3 +130,26 @@ def test_time_range_year_month():
     assert parse_time_range("7月花了多少", base) == (
         datetime.date(2026, 7, 1), datetime.date(2026, 7, 31),
     )
+    assert parse_time_range("25年7月份花了多少", base) == (
+        datetime.date(2025, 7, 1), datetime.date(2025, 7, 31),
+    )
+    assert parse_time_range("23年的账单", base) == (
+        datetime.date(2023, 1, 1), datetime.date(2023, 12, 31),
+    )
+
+
+def test_abbreviated_year_date():
+    from paas.modules.account.parser import parse_expense_date
+
+    base = datetime.date(2026, 8, 28)
+    assert parse_expense_date("25年7月5日微信吃饭花了25", base) == datetime.date(2025, 7, 5)
+    assert parse_expense_date("23年7月微信吃饭花了25", base) == datetime.date(2023, 7, 1)
+
+
+def test_preset_bank_and_alias():
+    from paas.modules.account.parser import PRESET_BANKS, detect_accounts
+
+    assert detect_accounts("建行卡花了25") == ["建行卡"]
+    assert detect_accounts("招商银行吃饭花了25") == ["招行卡"]
+    assert detect_accounts("龙卡花了25", [("建行卡", ["建行", "龙卡"])]) == ["建行卡"]
+    assert PRESET_BANKS

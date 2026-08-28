@@ -232,6 +232,119 @@ async def test_query_year_month_balance(client):
     assert "2025-07-01 ~ 2025-07-31" in r["reply_content"]
 
 
+async def test_import_confirm_flow(tmp_path):
+    from paas import settings_store
+    from paas.config import settings as st
+    from paas.db import connect, init_db
+    from paas.models import Attachment, InboundMessage
+    from paas.router import Router
+
+    st.db_path = tmp_path / "imp.db"
+    st.secret_key_path = tmp_path / "sk"
+    conn = connect()
+    init_db(conn)
+    settings_store.ensure_default_settings(conn)
+    conn.close()
+    router = Router()
+    csv_data = (
+        "日期,金额,分类,备注\n"
+        "2026-08-01,86.5,餐饮,吃火锅\n"
+        "2026-08-02,23,交通,打车\n"
+    ).encode("utf-8-sig")
+
+    async def send(mid, content="", att=None):
+        return await router.handle(
+            InboundMessage(
+                namespace="default", platform="qq", user_id="u_imp", chat_id="c",
+                message_id=mid, content=content, attachments=att or [],
+            )
+        )
+
+    r1 = await send("imp1", att=[Attachment(filename="a.csv", data=csv_data)])
+    assert r1.status == "pending_confirmation"
+    assert "将新增 2 行" in r1.reply_content
+    conn = connect()
+    n0 = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
+    conn.close()
+    assert n0 == 0  # 确认前账本不变
+
+    r2 = await send("imp2", content="是")
+    assert r2.status == "success"
+    assert "新增 2 行" in r2.reply_content
+    conn = connect()
+    n1 = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
+    reply_log = conn.execute(
+        "SELECT reply FROM raw_messages WHERE message_id='imp1'"
+    ).fetchone()["reply"]
+    conn.close()
+    assert n1 == 2
+    assert "账本预览" in reply_log  # 回复日志已落库
+
+    r3 = await send("imp3", att=[Attachment(filename="a.csv", data=csv_data)])
+    assert "跳过 2 行" in r3.reply_content
+    r4 = await send("imp4", content="是")
+    assert "新增 0 行" in r4.reply_content
+    await router.shutdown()
+
+
+async def test_ai_disabled_and_enabled(client, monkeypatch):
+    headers = {"X-Api-Key": "test-api-key"}
+    base = {"platform": "qq", "user_id": "u_ai", "chat_id": "c_ai", "content": "用AI：今天微信吃饭花了25"}
+    r = await client.post("/api/v1/message/inbound", headers=headers, json={**base, "message_id": "ai0"})
+    assert "未启用" in r.json()["reply_content"]
+
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    put = await client.put(
+        "/admin/api/ai",
+        json={"mode": "cloud", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1", "api_key": "sk-test"},
+    )
+    assert put.status_code == 200
+    got = await client.get("/admin/api/ai")
+    assert got.json()["has_api_key"] is True
+    assert got.json()["mode"] == "cloud"
+
+    async def fake_ai(conn, content):
+        calls.append(content)
+        return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 25, "account": "微信", "note": "吃饭"}
+
+    calls = []
+    monkeypatch.setattr("paas.interpreter.core.ai_interpret", fake_ai)
+    r2 = await client.post("/api/v1/message/inbound", headers=headers, json={**base, "message_id": "ai1"})
+    assert r2.json()["status"] == "success"
+    assert "25.00 元" in r2.json()["reply_content"]
+    assert calls == ["今天微信吃饭花了25"]
+
+    async def fake_ai2(conn, content):
+        calls.append(content)
+        return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 35, "account": "", "note": "打车"}
+
+    monkeypatch.setattr("paas.interpreter.core.ai_interpret", fake_ai2)
+    r3 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "ai2", "content": "用AI：今天微信吃饭花了35"},
+    )
+    assert r3.json()["status"] == "pending_confirmation"
+    assert "账户" in r3.json()["reply_content"]
+    assert calls == ["今天微信吃饭花了25", "今天微信吃饭花了35"]
+
+
+async def test_conversations_api(client):
+    headers = {"X-Api-Key": "test-api-key"}
+    await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={"platform": "qq", "user_id": "u_conv", "chat_id": "c", "message_id": "cv1", "content": "今天微信吃饭花了25元"},
+    )
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    r = await client.get("/admin/api/conversations?limit=10")
+    assert r.status_code == 200
+    convs = r.json()["conversations"]
+    assert any(c["message_id"] == "cv1" and "已记录" in (c["reply"] or "") for c in convs)
+
+
 async def test_balance_to_flow(client):
     headers = {"X-Api-Key": "test-api-key"}
     base = {"platform": "qq", "user_id": "u_bal2", "chat_id": "c_bal2"}

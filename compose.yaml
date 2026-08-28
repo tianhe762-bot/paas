@@ -13,3 +13,13 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+
+  # 可选本地 AI：启用方式 docker compose --profile ai up -d
+  ollama:
+    image: ollama/ollama:latest
+    container_name: paas-ollama
+    restart: unless-stopped
+    profiles: ["ai"]
+    network_mode: host
+    volumes:
+      - ./data/ollama:/root/.ollama

@@ -20,6 +20,7 @@ from paas.modules.account.parser import (
     parse_time_range,
     yuan_to_cents,
 )
+from paas.modules.account.importer import parse_import
 from paas.modules.account.queries import day_summary, period_detail, recent_expenses, touch_chat
 
 log = logging.getLogger("paas.router")
@@ -61,6 +62,20 @@ class Router:
     async def handle(self, msg: InboundMessage) -> Reply:
         conn = connect()
         try:
+            reply = await self._process(conn, msg)
+            if reply and reply.reply_content:
+                conn.execute(
+                    "UPDATE raw_messages SET reply = ? "
+                    "WHERE namespace = ? AND platform = ? AND message_id = ?",
+                    (reply.reply_content[:2000], msg.namespace, msg.platform, msg.message_id),
+                )
+                conn.commit()
+            return reply
+        finally:
+            conn.close()
+
+    async def _process(self, conn, msg: InboundMessage) -> Reply:
+        try:
             touch_chat(conn, msg.namespace, msg.user_id, msg.platform, msg.chat_id)
             s.save_raw_message(conn, msg.namespace, msg.platform, msg.message_id, msg.user_id, msg.content)
 
@@ -79,6 +94,10 @@ class Router:
             # 防重：同一消息 ID 重发直接拒绝，与 30 秒防抖是两套独立机制
             if s.message_already_processed(conn, msg.namespace, msg.platform, msg.message_id):
                 return Reply(status="duplicate", reply_content="⚠️ 该消息已记录过，请勿重复发送。")
+
+            ai_match = re.match(r"^(?:用AI|AI识别|AI解析)[:：]\s*(.+)", content)
+            if ai_match:
+                return await self._handle_ai(conn, msg, ai_match.group(1).strip())
 
             if DELETE_RE.search(content):
                 return await self._handle_delete(conn, msg, content)
@@ -109,7 +128,7 @@ class Router:
 
             return await self._record(conn, msg, content)
         finally:
-            conn.close()
+            pass
 
     async def shutdown(self) -> None:
         await self._download_client.aclose()
@@ -134,6 +153,10 @@ class Router:
             w in content for w in ("多少", "账单", "报表", "统计", "汇总", "查询", "花了多少钱")
         ):
             return True
+        if re.search(r"\d{2}\s*年", content) and any(
+            w in content for w in ("多少", "账单", "报表", "统计", "汇总", "查询", "花了多少钱")
+        ):
+            return True
         if ("今年" in content or "去年" in content) and any(
             w in content for w in ("多少", "账单", "报表", "统计", "汇总", "查询", "花了多少钱")
         ):
@@ -141,6 +164,8 @@ class Router:
         if re.search(r"最近\s*\d+\s*[天日]", content):
             return True
         if re.fullmatch(r"\s*\d{4}\s*年(?:\s*\d{1,2}\s*月(?:份)?)?\s*", content):
+            return True
+        if re.fullmatch(r"\s*\d{2}\s*年(?:\s*\d{1,2}\s*月(?:份)?)?\s*", content):
             return True
         if re.fullmatch(r"\s*\d{1,2}\s*月(?:份)?\s*", content):
             return True
@@ -165,6 +190,32 @@ class Router:
         if content in s.CANCEL_PHRASES:
             s.clear_pending(conn, msg.namespace, msg.user_id)
             return Reply(status="cancelled", reply_content="👌 已取消。")
+
+        if action == "IMPORT_CONFIRM":
+            if content not in s.CONFIRM_PHRASES:
+                return Reply(
+                    status="pending_confirmation",
+                    reply_content="请回复【是】确认合并导入，或【否】取消。",
+                    requires_confirmation=True,
+                )
+            s.clear_pending(conn, msg.namespace, msg.user_id)
+            payload = json.loads(pending["payload"])
+            result = s.merge_staged(
+                conn, payload["staging_id"], msg.namespace, msg.user_id, msg.platform
+            )
+            if result["errors"]:
+                detail = "；".join(result["errors"][:5])
+                return Reply(
+                    status="success",
+                    reply_content=(
+                        f"📥 合并完成：新增 {result['new']} 行，跳过 {result['skip']} 行。"
+                        f"（部分行重复：{detail}）"
+                    ),
+                )
+            return Reply(
+                status="success",
+                reply_content=f"📥 合并完成：新增 {result['new']} 行，跳过 {result['skip']} 行（与现有账本或文件内重复）。",
+            )
 
         if action == "DUPLICATE_CONFIRM":
             if content not in s.CONFIRM_PHRASES:
@@ -350,13 +401,43 @@ class Router:
 
     async def _record(self, conn, msg: InboundMessage, content: str) -> Reply:
         categories = s.load_categories(conn)
-        items = parse_expenses(content, categories, timeutil.today())
+        accts = s.account_keywords(conn, msg.namespace, msg.user_id)
+        items = parse_expenses(content, categories, timeutil.today(), accts)
         if not items:
             return Reply(
                 status="unrecognized",
                 reply_content="未能识别消费内容。例如：「今天微信吃饭花了25」，或发送 .csv/.xlsx 账本导入。",
             )
         return self._draft_next(conn, msg, items, {"raw_text": content})
+
+    async def _handle_ai(self, conn, msg: InboundMessage, content: str) -> Reply:
+        from paas.interpreter.core import (
+            InterpreterDisabled,
+            ai_interpret,
+            ai_result_to_item,
+        )
+
+        try:
+            result = await ai_interpret(conn, content)
+        except InterpreterDisabled as exc:
+            return Reply(
+                status="unrecognized",
+                reply_content=f"{exc}。可在管理界面 → 系统设置 → AI 识别中开启。",
+            )
+        except Exception as exc:  # noqa: BLE001
+            # AI 失败降级为规则识别
+            categories = s.load_categories(conn)
+            accts = s.account_keywords(conn, msg.namespace, msg.user_id)
+            items = parse_expenses(content, categories, timeutil.today(), accts)
+            if items:
+                return self._draft_next(conn, msg, items, {"raw_text": content})
+            return Reply(status="error", reply_content=f"AI 解析失败：{exc}")
+        categories = s.load_categories(conn)
+        try:
+            item = ai_result_to_item(result, categories, timeutil.today())
+        except ValueError as exc:
+            return Reply(status="error", reply_content=f"AI 结果无效：{exc}")
+        return self._draft_next(conn, msg, [item], {"raw_text": content})
 
     def _record_final(
         self, conn, msg: InboundMessage, items: list[ParsedItem], raw_text: str, skip_debounce: bool = False
@@ -668,20 +749,40 @@ class Router:
                 )
         if not data:
             return Reply(status="error", reply_content="⚠️ 未获取到文件内容。")
-        result, _ = s.import_file(
-            conn,
-            msg.namespace,
-            msg.user_id,
-            msg.platform,
-            msg.message_id,
-            att.filename or "import",
-            data,
+        categories = s.load_categories(conn)
+        result, items = parse_import(data, att.filename or "import", categories)
+        if not items:
+            return Reply(
+                status="error",
+                reply_content="⚠️ 文件中没有可识别的有效记录。" +
+                (f"\n原因：{'；'.join(result.errors[:5])}" if result.errors else ""),
+            )
+        preview = s.preview_merge(conn, msg.namespace, msg.user_id, items)
+        staging_id = s.create_import_staging(
+            conn, msg.namespace, msg.user_id, msg.platform, msg.message_id,
+            att.filename or "import", items,
+        )
+        ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
+        s.set_pending(
+            conn, msg.namespace, msg.user_id, "IMPORT_CONFIRM",
+            {"staging_id": staging_id}, ttl,
         )
         lines = [
-            f"📥 账本导入完成：共 {result.total_rows} 行，成功 {result.success_rows} 行，"
-            f"跳过/失败 {result.failed_rows} 行。"
+            f"📥 账本预览（{att.filename}）",
+            f"· 文件行数：{result.total_rows}，可识别：{len(items)} 行，无效：{result.failed_rows} 行",
         ]
+        if preview["date_min"]:
+            lines.append(f"· 日期范围：{preview['date_min']} ~ {preview['date_max']}")
+        lines.append(f"· 支出合计：{s.format_money(preview['expense_cents'])} 元，收入合计：{s.format_money(preview['income_cents'])} 元")
+        if preview["categories"]:
+            cats = "、".join(f"{c[0]}({c[1]})" for c in preview["categories"])
+            lines.append(f"· 主要分类：{cats}")
+        lines.append(f"· 合并后：将新增 {preview['new']} 行，跳过 {preview['skip']} 行（与现有账本或文件内重复）")
         if result.errors:
-            lines.append("失败明细：")
-            lines.extend(f"· {e}" for e in result.errors[:10])
-        return Reply(status="success", reply_content="\n".join(lines), parsed_count=result.success_rows)
+            lines.append(f"· 无效行原因示例：{'；'.join(result.errors[:3])}")
+        lines.append("\n回复【是】确认合并，回复【否】取消。")
+        return Reply(
+            status="pending_confirmation",
+            reply_content="\n".join(lines),
+            requires_confirmation=True,
+        )

@@ -412,3 +412,39 @@ def import_template_csv() -> bytes:
     writer.writerow(["2026-08-03", 35, "购物", "日用品"])
     return buf.getvalue().encode("utf-8-sig")
 
+
+# ---------- AI 设置 ----------
+
+def get_ai_settings(conn) -> dict:
+    s = settings_store.get_all(conn)
+    return {
+        "mode": s.get("ai_mode", "off"),
+        "model": s.get("ai_model", "qwen2.5:0.5b"),
+        "base_url": s.get("ai_base_url", ""),
+        "has_api_key": bool(s.get("ai_api_key", "")),
+        "timeout_seconds": s.get("ai_timeout_seconds", "45"),
+    }
+
+
+def put_ai_settings(conn, updates: dict[str, Any]) -> list[str]:
+    applied: list[str] = []
+    for key, value in updates.items():
+        if key == "ai_api_key":
+            if value and str(value) not in ("", "••••••••"):
+                from paas.security import encrypt_json
+
+                settings_store.set_setting(conn, "ai_api_key", encrypt_json({"key": str(value)}))
+                applied.append(key)
+            continue
+        if key in ("ai_mode", "ai_model", "ai_base_url", "ai_timeout_seconds"):
+            settings_store.set_setting(conn, key, str(value))
+            applied.append(key)
+    return applied
+
+
+def bot_users(conn, namespace: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT DISTINCT user_id FROM user_chats WHERE namespace = ? ORDER BY user_id",
+        (namespace,),
+    ).fetchall()
+    return [r["user_id"] for r in rows]

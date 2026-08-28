@@ -311,12 +311,11 @@ docker compose build --pull && docker compose up -d          # 升级
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q                                    # 55 项测试（含 4253 条大规模批量用例）
-python -m scripts.bulk_test                  # 单独跑大规模批量测试，生成 bulk_report.txt
+pytest -q                                    # 常规测试套件
 powershell -File scripts/check_lf.ps1        # LF 换行校验（提交前必须通过）
 ```
 
-批量测试覆盖：记账语序/语气变体、收入、转账手续费、退款、删除撤销（含往期）、修改、历史补记、时间段报表、余额与初始余额、缺数据询问、防重防抖、平账、多平台账单导入、导出。
+（`scripts/bulk_test.py` 为可选的数千条压力测试，默认不运行，仅需要时手动执行。）
 
 ## 目录结构
 

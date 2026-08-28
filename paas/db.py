@@ -112,10 +112,22 @@ CREATE TABLE IF NOT EXISTS accounts (
     namespace TEXT NOT NULL DEFAULT 'default',
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '',
     initial_balance_cents INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(namespace, user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS account_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL,
+    name TEXT NOT NULL,
+    aliases TEXT NOT NULL DEFAULT '',
+    initial_balance_cents INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(namespace, name)
 );
 
 CREATE TABLE IF NOT EXISTS raw_messages (
@@ -125,8 +137,20 @@ CREATE TABLE IF NOT EXISTS raw_messages (
     message_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     content TEXT NOT NULL,
+    reply TEXT NOT NULL DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(namespace, platform, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS import_staging (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    user_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
 );
 """
 
@@ -195,7 +219,40 @@ def migrate_db(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE expenses SET tx_type='expense' WHERE tx_type IS NULL OR tx_type=''")
     conn.execute("UPDATE expenses SET status='normal' WHERE status IS NULL")
     _migrate_v3(conn)
+    _migrate_v4(conn)
     conn.commit()
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    if "aliases" not in _column_names(conn, "accounts"):
+        conn.execute("ALTER TABLE accounts ADD COLUMN aliases TEXT NOT NULL DEFAULT ''")
+    if "reply" not in _column_names(conn, "raw_messages"):
+        conn.execute("ALTER TABLE raw_messages ADD COLUMN reply TEXT NOT NULL DEFAULT ''")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS account_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            namespace TEXT NOT NULL,
+            name TEXT NOT NULL,
+            aliases TEXT NOT NULL DEFAULT '',
+            initial_balance_cents INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(namespace, name)
+        );
+        CREATE TABLE IF NOT EXISTS import_staging (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            namespace TEXT NOT NULL DEFAULT 'default',
+            user_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+    conn.execute("PRAGMA user_version = 4")
 
 
 def _migrate_v3(conn: sqlite3.Connection) -> None:
