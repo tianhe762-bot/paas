@@ -9,10 +9,14 @@ DEFAULTS: dict[str, str] = {
     "amount_rounding": "2",
     "backup_keep_days": "30",
     "backup_hour": "3",
-    "ai_mode": "off",
-    "ai_model": "qwen2.5:0.5b",
-    "ai_base_url": "",
-    "ai_api_key": "",
+    "ai_local_enabled": "0",
+    "ai_cloud_enabled": "0",
+    "ai_order": "rules,local,cloud",
+    "ai_local_model": "qwen2.5:0.5b",
+    "ai_local_base_url": "http://localhost:11434",
+    "ai_cloud_model": "",
+    "ai_cloud_base_url": "",
+    "ai_cloud_api_key": "",
     "ai_timeout_seconds": "45",
 }
 

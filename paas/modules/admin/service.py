@@ -42,6 +42,12 @@ SECRET_FIELDS = {
 }
 
 MAX_BOTS_PER_PLATFORM = 5
+AI_LOCAL_DELETE_CONFIRM = "删除本地模型"
+VALID_AI_ORDERS = {
+    "rules,local,cloud", "rules,cloud,local",
+    "local,rules,cloud", "local,cloud,rules",
+    "cloud,rules,local", "cloud,local,rules",
+}
 
 
 def ensure_admin(conn) -> str:
@@ -451,29 +457,68 @@ def import_template_csv() -> bytes:
 # ---------- AI 设置 ----------
 
 def get_ai_settings(conn) -> dict:
+    migrate_ai_settings(conn)
     s = settings_store.get_all(conn)
     return {
-        "mode": s.get("ai_mode", "off"),
-        "model": s.get("ai_model", "qwen2.5:0.5b"),
-        "base_url": s.get("ai_base_url", ""),
-        "has_api_key": bool(s.get("ai_api_key", "")),
+        "local_enabled": s.get("ai_local_enabled") == "1",
+        "local_model": s.get("ai_local_model", "qwen2.5:0.5b"),
+        "local_base_url": s.get("ai_local_base_url", "http://localhost:11434"),
+        "cloud_enabled": s.get("ai_cloud_enabled") == "1",
+        "cloud_model": s.get("ai_cloud_model", ""),
+        "cloud_base_url": s.get("ai_cloud_base_url", ""),
+        "has_api_key": bool(s.get("ai_cloud_api_key", "")),
+        "order": s.get("ai_order", "rules,local,cloud"),
         "timeout_seconds": s.get("ai_timeout_seconds", "45"),
     }
 
 
+def migrate_ai_settings(conn) -> None:
+    rows = {
+        r["key"]: r["value"]
+        for r in conn.execute("SELECT key, value FROM settings").fetchall()
+    }
+    if "ai_mode" in rows and "ai_local_enabled" not in rows:
+        mode = rows.get("ai_mode", "off")
+        if mode == "ollama":
+            updates = {"ai_local_enabled": "1", "ai_order": "rules,local,cloud"}
+        elif mode == "cloud":
+            updates = {"ai_cloud_enabled": "1", "ai_order": "rules,cloud,local"}
+        else:
+            updates = {}
+        for k, v in updates.items():
+            settings_store.set_setting(conn, k, v)
+        conn.execute("DELETE FROM settings WHERE key='ai_mode'")
+        conn.commit()
+
+
 def put_ai_settings(conn, updates: dict[str, Any]) -> list[str]:
     applied: list[str] = []
-    for key, value in updates.items():
-        if key == "ai_api_key":
-            if value and str(value) not in ("", "••••••••"):
-                from paas.security import encrypt_json
+    mapping = {
+        "local_enabled": "ai_local_enabled",
+        "local_model": "ai_local_model",
+        "local_base_url": "ai_local_base_url",
+        "cloud_enabled": "ai_cloud_enabled",
+        "cloud_model": "ai_cloud_model",
+        "cloud_base_url": "ai_cloud_base_url",
+        "timeout_seconds": "ai_timeout_seconds",
+    }
+    for key, skey in mapping.items():
+        if key in updates:
+            value = updates[key]
+            if isinstance(value, bool):
+                value = "1" if value else "0"
+            settings_store.set_setting(conn, skey, str(value))
+            applied.append(skey)
+    if "order" in updates:
+        order = ",".join(p.strip() for p in str(updates["order"]).split(",") if p.strip())
+        if order in VALID_AI_ORDERS:
+            settings_store.set_setting(conn, "ai_order", order)
+            applied.append("ai_order")
+    if updates.get("api_key") not in (None, "", "••••••••"):
+        from paas.security import encrypt_json
 
-                settings_store.set_setting(conn, "ai_api_key", encrypt_json({"key": str(value)}))
-                applied.append(key)
-            continue
-        if key in ("ai_mode", "ai_model", "ai_base_url", "ai_timeout_seconds"):
-            settings_store.set_setting(conn, key, str(value))
-            applied.append(key)
+        settings_store.set_setting(conn, "ai_cloud_api_key", encrypt_json({"key": str(updates["api_key"])}))
+        applied.append("ai_cloud_api_key")
     return applied
 
 

@@ -258,14 +258,28 @@ async def test_ai_disabled_and_enabled(client, monkeypatch):
     )
     put = await client.put(
         "/admin/api/ai",
-        json={"mode": "cloud", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1", "api_key": "sk-test"},
+        json={
+            "local_enabled": False,
+            "local_model": "qwen2.5:0.5b",
+            "local_base_url": "http://localhost:11434",
+            "cloud_enabled": True,
+            "cloud_model": "deepseek-chat",
+            "cloud_base_url": "https://api.deepseek.com/v1",
+            "api_key": "sk-test",
+            "order": "rules,cloud,local",
+            "timeout_seconds": "45",
+        },
     )
     assert put.status_code == 200
     got = await client.get("/admin/api/ai")
     assert got.json()["has_api_key"] is True
-    assert got.json()["mode"] == "cloud"
+    assert got.json()["cloud_enabled"] is True
+    assert got.json()["order"] == "rules,cloud,local"
 
-    async def fake_ai(conn, content):
+    seen = []
+
+    async def fake_ai(conn, content, backend):
+        seen.append((content, backend))
         calls.append(content)
         return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 25, "account": "微信", "note": "吃饭"}
 
@@ -275,8 +289,9 @@ async def test_ai_disabled_and_enabled(client, monkeypatch):
     assert r2.json()["status"] == "success"
     assert "25.00 元" in r2.json()["reply_content"]
     assert calls == ["今天微信吃饭花了25"]
+    assert seen == [("今天微信吃饭花了25", "cloud")]  # 手动触发：跳过规则，云端（顺序中先于本地）
 
-    async def fake_ai2(conn, content):
+    async def fake_ai2(conn, content, backend):
         calls.append(content)
         return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 35, "account": "", "note": "打车"}
 

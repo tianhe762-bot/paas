@@ -209,27 +209,62 @@
       <div style="margin-top:14px"><button class="btn-primary" onclick="saveSettings()">保存设置</button><span class="msg" id="msg-settings"></span></div>
     </div>
     <div class="card">
-      <h2>AI 识别（可选，默认关闭）</h2>
-      <p class="muted">开启后可在聊天里发「用AI：今天微信吃饭花了25」手动调用；AI 结果仍会经过校验、缺信息询问与防重。</p>
-      <div class="row">
-        <div><label>模式</label>
-          <select id="aiMode">
-            <option value="off">不启用</option>
-            <option value="ollama">本地模型（Ollama）</option>
-            <option value="cloud">云端 API</option>
-          </select>
+      <h2>AI 识别（可选）</h2>
+      <p class="muted">聊天里发「用AI：今天微信吃饭花了25」可手动调用；识别顺序可自定义"哪个优先、哪个保底"。停用本地模型只停止调用，不会删除已下载的模型。</p>
+      <div class="card" style="margin:0">
+        <div class="flex"><strong>规则引擎（字典/正则）</strong><span class="tag">始终启用</span></div>
+        <p class="muted">默认识别方式，零成本离线运行，可作为保底引擎。</p>
+      </div>
+      <div class="card" id="aiLocalCard">
+        <div class="flex">
+          <strong>本地模型（Ollama，独立容器）</strong>
+          <div class="switch"><input type="checkbox" id="aiLocalEnabled"><span>启用</span></div>
         </div>
-        <div><label>模型</label><input id="aiModel" placeholder="qwen2.5:0.5b 或云端模型名"></div>
-        <div><label>接口地址</label><input id="aiBaseUrl" placeholder="云端 base_url，如 https://api.deepseek.com/v1；Ollama 默认 http://localhost:11434"></div>
+        <p class="muted">停用只停止调用、保留模型；「删除本地模型」才会真正移除文件（需重新下载）。</p>
+        <div class="row">
+          <div><label>模型（预设或手填 Ollama 模型名）</label>
+            <input id="aiLocalModel" list="aiLocalModelList" placeholder="qwen2.5:0.5b">
+            <datalist id="aiLocalModelList">
+              <option value="qwen2.5:0.5b">qwen2.5:0.5b（默认，约 400MB）</option>
+              <option value="qwen2.5:1.5b">qwen2.5:1.5b（约 1GB）</option>
+            </datalist>
+          </div>
+          <div><label>接口地址（PAAS 调用地址，不是下载地址）</label><input id="aiLocalBaseUrl" placeholder="http://localhost:11434"></div>
+        </div>
+        <div style="margin-top:10px">
+          <button class="btn-ghost btn-sm" onclick="aiStatus()">查看状态</button>
+          <button class="btn-ghost btn-sm" onclick="aiPull()">拉取模型</button>
+          <button class="btn-danger btn-sm" onclick="aiDeleteLocal()">删除本地模型</button>
+          <input id="aiDeleteConfirm" style="width:auto;display:inline-block;margin-left:8px" placeholder="输入：删除本地模型">
+        </div>
+      </div>
+      <div class="card" id="aiCloudCard">
+        <div class="flex">
+          <strong>云端模型（OpenAI 兼容 API）</strong>
+          <div class="switch"><input type="checkbox" id="aiCloudEnabled"><span>启用</span></div>
+        </div>
+        <p class="muted">兼容 OpenAI / DeepSeek / 通义等；密钥加密存储。</p>
+        <div class="row">
+          <div><label>接口地址（base_url）</label><input id="aiCloudBaseUrl" placeholder="https://api.deepseek.com/v1"></div>
+          <div><label>模型名</label><input id="aiCloudModel" placeholder="deepseek-chat 等"></div>
+          <div><label>API Key（留空不改）</label><input id="aiApiKey" type="password"></div>
+        </div>
       </div>
       <div class="row">
-        <div><label>API Key（云端，留空不改）</label><input id="aiApiKey" type="password"></div>
+        <div><label>识别顺序（优先 → 保底）</label>
+          <select id="aiOrder">
+            <option value="rules,local,cloud">规则 → 本地 → 云端</option>
+            <option value="rules,cloud,local">规则 → 云端 → 本地</option>
+            <option value="local,rules,cloud">本地 → 规则 → 云端</option>
+            <option value="local,cloud,rules">本地 → 云端 → 规则</option>
+            <option value="cloud,rules,local">云端 → 规则 → 本地</option>
+            <option value="cloud,local,rules">云端 → 本地 → 规则</option>
+          </select>
+        </div>
         <div><label>超时（秒）</label><input id="aiTimeout" placeholder="45"></div>
       </div>
       <div style="margin-top:12px">
         <button class="btn-primary" onclick="saveAi()">保存 AI 设置</button>
-        <button class="btn-ghost" onclick="aiStatus()">查看状态</button>
-        <button class="btn-ghost" onclick="aiPull()">拉取本地模型</button>
         <span class="msg" id="msg-ai"></span>
       </div>
       <div id="aiStatusResult" class="muted" style="margin-top:10px"></div>
@@ -537,24 +572,42 @@ async function loadSettings() {
 async function loadAi() {
   try {
     const a = await api("/admin/api/ai");
-    document.getElementById("aiMode").value = a.mode || "off";
-    document.getElementById("aiModel").value = a.model || "qwen2.5:0.5b";
-    document.getElementById("aiBaseUrl").value = a.base_url || "";
+    document.getElementById("aiLocalEnabled").checked = !!a.local_enabled;
+    document.getElementById("aiLocalModel").value = a.local_model || "qwen2.5:0.5b";
+    document.getElementById("aiLocalBaseUrl").value = a.local_base_url || "http://localhost:11434";
+    document.getElementById("aiCloudEnabled").checked = !!a.cloud_enabled;
+    document.getElementById("aiCloudModel").value = a.cloud_model || "";
+    document.getElementById("aiCloudBaseUrl").value = a.cloud_base_url || "";
+    document.getElementById("aiOrder").value = a.order || "rules,local,cloud";
     document.getElementById("aiTimeout").value = a.timeout_seconds || "45";
     document.getElementById("aiApiKey").value = "";
     document.getElementById("aiApiKey").placeholder = a.has_api_key ? "已保存，留空不改" : "输入 API Key";
+    aiToggleGrey();
   } catch (e) { /* 忽略 */ }
 }
+function aiToggleGrey() {
+  const localOn = document.getElementById("aiLocalEnabled").checked;
+  const cloudOn = document.getElementById("aiCloudEnabled").checked;
+  document.getElementById("aiLocalCard").style.opacity = localOn ? "1" : "0.55";
+  document.getElementById("aiCloudCard").style.opacity = cloudOn ? "1" : "0.55";
+}
+document.getElementById("aiLocalEnabled").addEventListener("change", aiToggleGrey);
+document.getElementById("aiCloudEnabled").addEventListener("change", aiToggleGrey);
 async function saveAi() {
   try {
     const r = await api("/admin/api/ai", {method: "PUT", body: JSON.stringify({
-      mode: document.getElementById("aiMode").value,
-      model: document.getElementById("aiModel").value.trim(),
-      base_url: document.getElementById("aiBaseUrl").value.trim(),
+      local_enabled: document.getElementById("aiLocalEnabled").checked,
+      local_model: document.getElementById("aiLocalModel").value.trim(),
+      local_base_url: document.getElementById("aiLocalBaseUrl").value.trim(),
+      cloud_enabled: document.getElementById("aiCloudEnabled").checked,
+      cloud_model: document.getElementById("aiCloudModel").value.trim(),
+      cloud_base_url: document.getElementById("aiCloudBaseUrl").value.trim(),
       api_key: document.getElementById("aiApiKey").value,
+      order: document.getElementById("aiOrder").value,
       timeout_seconds: document.getElementById("aiTimeout").value.trim() || "45",
     })});
     showMsg("msg-ai", "已保存：" + (r.applied.length ? r.applied.join(", ") : "无变更"), true);
+    await loadAi();
   } catch (e) { showMsg("msg-ai", "保存失败：" + e.message, false); }
 }
 async function aiStatus() {
@@ -567,10 +620,21 @@ async function aiStatus() {
 }
 async function aiPull() {
   try {
-    const model = document.getElementById("aiModel").value.trim() || "qwen2.5:0.5b";
+    const model = document.getElementById("aiLocalModel").value.trim() || "qwen2.5:0.5b";
     const r = await api("/admin/api/ai/pull", {method: "POST", body: JSON.stringify({model})});
     document.getElementById("aiStatusResult").textContent = r.message;
   } catch (e) { showMsg("msg-ai", "拉取失败：" + e.message, false); }
+}
+async function aiDeleteLocal() {
+  try {
+    const model = document.getElementById("aiLocalModel").value.trim();
+    const confirm = document.getElementById("aiDeleteConfirm").value.trim();
+    if (!model) { showMsg("msg-ai", "请先填写要删除的模型名", false); return; }
+    if (confirm !== "删除本地模型") { showMsg("msg-ai", "请输入确认短语「删除本地模型」", false); return; }
+    const r = await api("/admin/api/ai/local/delete", {method: "POST", body: JSON.stringify({model, confirm})});
+    showMsg("msg-ai", r.message, r.ok);
+    document.getElementById("aiDeleteConfirm").value = "";
+  } catch (e) { showMsg("msg-ai", "删除失败：" + e.message, false); }
 }
 async function saveSettings() {
   try {

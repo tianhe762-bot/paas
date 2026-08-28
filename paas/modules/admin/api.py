@@ -55,11 +55,20 @@ class AccountsBody(BaseModel):
 
 
 class AiBody(BaseModel):
-    mode: str = "off"
-    model: str = "qwen2.5:0.5b"
-    base_url: str = ""
+    local_enabled: bool = False
+    local_model: str = "qwen2.5:0.5b"
+    local_base_url: str = "http://localhost:11434"
+    cloud_enabled: bool = False
+    cloud_model: str = ""
+    cloud_base_url: str = ""
     api_key: str = ""
+    order: str = "rules,local,cloud"
     timeout_seconds: str = "45"
+
+
+class AiDeleteBody(BaseModel):
+    model: str
+    confirm: str = ""
 
 
 class BackfillBody(BaseModel):
@@ -290,30 +299,39 @@ def put_bot_accounts(request: Request, bot_id: str, body: AccountsBody) -> dict:
 # ---------- AI ----------
 
 @router.get("/ai")
-def get_ai(request: Request) -> dict:
+async def get_ai(request: Request) -> dict:
     _require_session(request)
+    from paas.interpreter.core import ollama_status
+
     conn = connect()
     try:
-        return admin_service.get_ai_settings(conn)
+        data = admin_service.get_ai_settings(conn)
+        if data["local_enabled"]:
+            data["local_installed"] = await ollama_status(data["local_base_url"])
+        else:
+            data["local_installed"] = {"ok": False, "error": "本地模型未启用"}
     finally:
         conn.close()
+    return data
 
 
 @router.put("/ai")
 def put_ai(request: Request, body: AiBody) -> dict:
     _require_session(request)
-    if body.mode not in ("off", "ollama", "cloud"):
-        raise HTTPException(status_code=400, detail="mode 必须是 off/ollama/cloud")
     conn = connect()
     try:
         applied = admin_service.put_ai_settings(
             conn,
             {
-                "ai_mode": body.mode,
-                "ai_model": body.model,
-                "ai_base_url": body.base_url,
-                "ai_api_key": body.api_key,
-                "ai_timeout_seconds": body.timeout_seconds,
+                "local_enabled": body.local_enabled,
+                "local_model": body.local_model,
+                "local_base_url": body.local_base_url,
+                "cloud_enabled": body.cloud_enabled,
+                "cloud_model": body.cloud_model,
+                "cloud_base_url": body.cloud_base_url,
+                "api_key": body.api_key,
+                "order": body.order,
+                "timeout_seconds": body.timeout_seconds,
             },
         )
     finally:
@@ -328,7 +346,7 @@ async def ai_status(request: Request) -> dict:
 
     conn = connect()
     try:
-        base = admin_service.get_ai_settings(conn).get("base_url") or "http://localhost:11434"
+        base = admin_service.get_ai_settings(conn).get("local_base_url") or "http://localhost:11434"
     finally:
         conn.close()
     return await ollama_status(base)
@@ -346,6 +364,24 @@ async def ai_pull(request: Request, body: dict | None = None) -> dict:
     finally:
         conn.close()
     ok, msg = await ollama_pull(model, base)
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/ai/local/delete")
+async def ai_local_delete(request: Request, body: AiDeleteBody) -> dict:
+    _require_admin(request)
+    from paas.interpreter.core import ollama_rm
+
+    if body.confirm.strip() != admin_service.AI_LOCAL_DELETE_CONFIRM:
+        return {"ok": False, "message": f"请准确输入确认短语「{admin_service.AI_LOCAL_DELETE_CONFIRM}」"}
+    if not body.model.strip():
+        return {"ok": False, "message": "请指定要删除的模型"}
+    conn = connect()
+    try:
+        base = admin_service.get_ai_settings(conn).get("local_base_url") or "http://localhost:11434"
+    finally:
+        conn.close()
+    ok, msg = await ollama_rm(body.model.strip(), base)
     return {"ok": ok, "message": msg}
 
 

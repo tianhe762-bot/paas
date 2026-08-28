@@ -1,11 +1,17 @@
-import asyncio
+"""可选 AI 解释器：规则引擎 + 本地模型（Ollama）+ 云端 API 的引擎链。
+
+默认仅规则引擎；本地/云端由用户在管理界面分别开关，并可选择识别顺序
+（哪个优先、哪个保底）。停用只停止调用、保留已下载模型；
+删除本地模型才真正移除模型文件。
+"""
+
 import json
 import re
 
 import httpx
 
 from paas import settings_store, timeutil
-from paas.modules.account.parser import parse_expense_date, yuan_to_cents
+from paas.modules.account.parser import parse_expense_date
 
 SYSTEM_PROMPT = (
     "你是个人记账助手。把用户的中文记账消息解析为 JSON，只输出 JSON，不要任何其他文字。"
@@ -17,9 +23,22 @@ SYSTEM_PROMPT = (
     "type 为 transfer 时 account 是转出账户、to_account 是转入账户。"
 )
 
+VALID_ORDERS = {
+    "rules,local,cloud", "rules,cloud,local",
+    "local,rules,cloud", "local,cloud,rules",
+    "cloud,rules,local", "cloud,local,rules",
+}
+
 
 class InterpreterDisabled(RuntimeError):
     pass
+
+
+def normalize_order(order: str | None) -> list[str]:
+    parts = [p.strip() for p in (order or "").split(",") if p.strip()]
+    if ",".join(parts) not in VALID_ORDERS:
+        return ["rules", "local", "cloud"]
+    return parts
 
 
 def _extract_json(text: str) -> dict:
@@ -46,58 +65,49 @@ async def _chat_completion(url: str, headers: dict, payload: dict, timeout: floa
     return _extract_json(content)
 
 
-async def ai_interpret(conn, content: str) -> dict:
-    mode = settings_store.get_setting(conn, "ai_mode", "off") or "off"
-    if mode == "off":
-        raise InterpreterDisabled("AI 识别未启用")
-    model = settings_store.get_setting(conn, "ai_model", "qwen2.5:0.5b") or "qwen2.5:0.5b"
-    base_url = (settings_store.get_setting(conn, "ai_base_url", "") or "").strip()
+async def ai_interpret(conn, content: str, backend: str = "local") -> dict:
+    """调用单个 AI 后端（local=Ollama，cloud=OpenAI 兼容 API）。"""
+    if backend == "local":
+        if settings_store.get_setting(conn, "ai_local_enabled", "0") != "1":
+            raise InterpreterDisabled("本地模型未启用")
+        model = settings_store.get_setting(conn, "ai_local_model", "qwen2.5:0.5b") or "qwen2.5:0.5b"
+        base_url = (settings_store.get_setting(conn, "ai_local_base_url", "http://localhost:11434") or "http://localhost:11434").strip()
+        url = base_url.rstrip("/") + "/v1/chat/completions"
+        headers = {"Content-Type": "application/json"}
+    elif backend == "cloud":
+        if settings_store.get_setting(conn, "ai_cloud_enabled", "0") != "1":
+            raise InterpreterDisabled("云端模型未启用")
+        model = settings_store.get_setting(conn, "ai_cloud_model", "") or ""
+        base_url = (settings_store.get_setting(conn, "ai_cloud_base_url", "") or "").strip()
+        key_enc = settings_store.get_setting(conn, "ai_cloud_api_key", "") or ""
+        if not model or not base_url or not key_enc:
+            raise InterpreterDisabled("云端模型未配置完整（base_url/model/API Key）")
+        from paas.security import decrypt_json
+
+        api_key = decrypt_json(key_enc).get("key", "")
+        url = base_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    else:
+        raise ValueError(f"未知后端: {backend}")
     timeout = float(settings_store.get_setting(conn, "ai_timeout_seconds", "45") or 45)
     user_prompt = (
         f"记账消息：{content}\n"
         "请只输出 JSON。若信息不足（缺账户、缺时间、缺金额），对应字段给空字符串，不要编造。"
     )
-    if mode == "ollama":
-        base = base_url or "http://localhost:11434"
-        url = base.rstrip("/") + "/v1/chat/completions"
-        return await _chat_completion(
-            url,
-            {"Content-Type": "application/json"},
-            {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "stream": False,
-                "temperature": 0,
-            },
-            timeout,
-        )
-    if mode == "cloud":
-        key_enc = settings_store.get_setting(conn, "ai_api_key", "") or ""
-        if not key_enc:
-            raise ValueError("云端 AI 未配置 API Key")
-        from paas.security import decrypt_json
-
-        api_key = decrypt_json(key_enc).get("key", "")
-        if not api_key:
-            raise ValueError("云端 AI 未配置 API Key")
-        url = base_url.rstrip("/") + "/chat/completions"
-        return await _chat_completion(
-            url,
-            {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0,
-            },
-            timeout,
-        )
-    raise InterpreterDisabled("AI 识别未启用")
+    return await _chat_completion(
+        url,
+        headers,
+        {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "temperature": 0,
+        },
+        timeout,
+    )
 
 
 TYPE_MAP = {
@@ -111,7 +121,6 @@ TYPE_MAP = {
 
 
 def ai_result_to_item(result: dict, categories, base_date):
-    """AI JSON → ParsedItem；字段缺失/非法时抛 ValueError。"""
     from paas.models import ParsedItem
 
     amount = result.get("amount")
@@ -123,19 +132,14 @@ def ai_result_to_item(result: dict, categories, base_date):
         raise ValueError("AI 金额无效")
 
     date_str = str(result.get("date") or "").strip()
-    if date_str:
-        expense_date = parse_expense_date(date_str, timeutil.today())
-    else:
-        expense_date = None
-
+    expense_date = parse_expense_date(date_str, base_date) if date_str else None
     tx_type = TYPE_MAP.get(str(result.get("type") or "").strip(), "expense")
     cat_name = str(result.get("category") or "").strip() or "其他"
     cat = next((c for c in categories if c.name == cat_name), None)
     if cat is None:
         cat = next((c for c in categories if c.name == "其他"), categories[-1])
-
-    item = ParsedItem(
-        expense_date=expense_date or timeutil.today(),
+    return ParsedItem(
+        expense_date=expense_date or base_date,
         category_id=cat.id,
         category_name=cat.name,
         category_icon=cat.icon,
@@ -145,7 +149,51 @@ def ai_result_to_item(result: dict, categories, base_date):
         amount_cents=amount_cents,
         description=str(result.get("note") or "").strip() or cat.name,
     )
-    return item
+
+
+def rules_engine(content: str, categories, account_list):
+    """规则引擎：返回解析出的流水（可为多笔），无结果返回 None。"""
+    from paas.modules.account.parser import parse_expenses
+
+    items = parse_expenses(content, categories, timeutil.today(), account_list)
+    return items or None
+
+
+async def interpret(
+    conn,
+    content: str,
+    forced_ai: bool = False,
+    categories=None,
+    account_list=None,
+):
+    """按 ai_order 执行启用的引擎链，返回 (engine, items, last_error)。"""
+    order = normalize_order(settings_store.get_setting(conn, "ai_order", "rules,local,cloud"))
+    enabled = set()
+    if settings_store.get_setting(conn, "ai_local_enabled", "0") == "1":
+        enabled.add("local")
+    if settings_store.get_setting(conn, "ai_cloud_enabled", "0") == "1":
+        enabled.add("cloud")
+    if not forced_ai:
+        enabled.add("rules")
+    last_error = None
+    for name in order:
+        if name not in enabled:
+            continue
+        try:
+            if name == "rules":
+                items = rules_engine(content, categories, account_list)
+                if items:
+                    return ("rules", items, None)
+                continue
+            result = await ai_interpret(conn, content, backend=name)
+            item = ai_result_to_item(result, categories or [], timeutil.today())
+            return (name, [item], None)
+        except InterpreterDisabled:
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            continue
+    return (None, None, last_error)
 
 
 async def ollama_status(base_url: str | None = None) -> dict:
@@ -169,4 +217,15 @@ async def ollama_pull(model: str, base_url: str | None = None) -> tuple[bool, st
         return True, f"模型 {model} 已就绪"
     except Exception as exc:  # noqa: BLE001
         return False, f"拉取失败（请确认已启动 ollama 容器：docker compose --profile ai up -d）：{exc}"
+
+
+async def ollama_rm(model: str, base_url: str | None = None) -> tuple[bool, str]:
+    base = (base_url or "http://localhost:11434").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.delete(base + "/api/delete", json={"model": model})
+            resp.raise_for_status()
+        return True, f"模型 {model} 已删除"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"删除失败：{exc}"
 

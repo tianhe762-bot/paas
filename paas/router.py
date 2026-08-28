@@ -21,6 +21,7 @@ from paas.modules.account.parser import (
     yuan_to_cents,
 )
 from paas.modules.account.importer import parse_import
+from paas.interpreter.core import interpret
 from paas.modules.account.queries import day_summary, period_detail, recent_expenses, touch_chat
 
 log = logging.getLogger("paas.router")
@@ -402,7 +403,9 @@ class Router:
     async def _record(self, conn, msg: InboundMessage, content: str) -> Reply:
         categories = s.load_categories(conn)
         accts = s.account_keywords(conn, msg.namespace, msg.user_id)
-        items = parse_expenses(content, categories, timeutil.today(), accts)
+        _, items, _ = await interpret(
+            conn, content, categories=categories, account_list=accts
+        )
         if not items:
             return Reply(
                 status="unrecognized",
@@ -411,33 +414,23 @@ class Router:
         return self._draft_next(conn, msg, items, {"raw_text": content})
 
     async def _handle_ai(self, conn, msg: InboundMessage, content: str) -> Reply:
-        from paas.interpreter.core import (
-            InterpreterDisabled,
-            ai_interpret,
-            ai_result_to_item,
+        categories = s.load_categories(conn)
+        accts = s.account_keywords(conn, msg.namespace, msg.user_id)
+        engine, items, error = await interpret(
+            conn, content, forced_ai=True, categories=categories, account_list=accts
         )
-
-        try:
-            result = await ai_interpret(conn, content)
-        except InterpreterDisabled as exc:
+        if items:
+            return self._draft_next(conn, msg, items, {"raw_text": content})
+        if engine is None and error is None:
             return Reply(
                 status="unrecognized",
-                reply_content=f"{exc}。可在管理界面 → 系统设置 → AI 识别中开启。",
+                reply_content="AI 识别未启用（本地/云端均未开启）。可在管理界面 → 系统设置 → AI 识别中开启。",
             )
-        except Exception as exc:  # noqa: BLE001
-            # AI 失败降级为规则识别
-            categories = s.load_categories(conn)
-            accts = s.account_keywords(conn, msg.namespace, msg.user_id)
-            items = parse_expenses(content, categories, timeutil.today(), accts)
-            if items:
-                return self._draft_next(conn, msg, items, {"raw_text": content})
-            return Reply(status="error", reply_content=f"AI 解析失败：{exc}")
-        categories = s.load_categories(conn)
-        try:
-            item = ai_result_to_item(result, categories, timeutil.today())
-        except ValueError as exc:
-            return Reply(status="error", reply_content=f"AI 结果无效：{exc}")
-        return self._draft_next(conn, msg, [item], {"raw_text": content})
+        # AI 全部失败：降级为规则
+        items = parse_expenses(content, categories, timeutil.today(), accts)
+        if items:
+            return self._draft_next(conn, msg, items, {"raw_text": content})
+        return Reply(status="error", reply_content=f"AI 解析失败：{error or '未知错误'}")
 
     def _record_final(
         self, conn, msg: InboundMessage, items: list[ParsedItem], raw_text: str, skip_debounce: bool = False
