@@ -83,6 +83,17 @@ CREATE TABLE IF NOT EXISTS admin_users (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS user_ai_settings (
+    user_id INTEGER PRIMARY KEY,
+    local_enabled INTEGER NOT NULL DEFAULT 0,
+    cloud_enabled INTEGER NOT NULL DEFAULT 0,
+    cloud_model TEXT NOT NULL DEFAULT '',
+    cloud_base_url TEXT NOT NULL DEFAULT '',
+    api_key_enc TEXT NOT NULL DEFAULT '',
+    ai_order TEXT NOT NULL DEFAULT 'rules,local,cloud',
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS user_chats (
     namespace TEXT NOT NULL DEFAULT 'default',
     user_id TEXT NOT NULL,

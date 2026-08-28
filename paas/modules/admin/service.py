@@ -183,18 +183,43 @@ def _gen_bot_id() -> str:
 
 
 def list_bots(conn, viewer_id: int, admin: bool) -> list[dict]:
-    q = "SELECT * FROM bot_configs"
+    q = """
+        SELECT b.*, COALESCE(u.username, '无主') AS owner_name
+        FROM bot_configs b
+        LEFT JOIN admin_users u ON u.id = b.owner_id
+    """
     params: list[Any] = []
     if not admin:
-        q += " WHERE owner_id = ?"
+        q += " WHERE b.owner_id = ?"
         params.append(viewer_id)
-    q += " ORDER BY platform, id"
+    q += " ORDER BY b.platform, b.id"
     out = []
     for row in conn.execute(q, params).fetchall():
         d = dict(row)
         d["config"] = get_bot_fields(conn, row["bot_id"])
         out.append(d)
     return out
+
+
+def bot_ids_for_owner(conn, owner_id: int) -> set[str]:
+    """返回某登录账号拥有的全部 bot_id（namespace）。"""
+    rows = conn.execute(
+        "SELECT bot_id FROM bot_configs WHERE owner_id = ?", (owner_id,)
+    ).fetchall()
+    return {r["bot_id"] for r in rows}
+
+
+def scoped_count(conn, table: str, bot_ids: set[str] | None) -> int:
+    """统计某表行数；bot_ids 为 None 表示全部，空集合返回 0。"""
+    if bot_ids is None:
+        return conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+    if not bot_ids:
+        return 0
+    ph = ",".join("?" * len(bot_ids))
+    return conn.execute(
+        f"SELECT COUNT(*) AS n FROM {table} WHERE namespace IN ({ph})",
+        tuple(bot_ids),
+    ).fetchone()["n"]
 
 
 def get_bot(conn, bot_id: str) -> dict | None:
@@ -241,7 +266,8 @@ def create_bot(
     if platform not in CONFIG_DEFAULTS:
         return False, "未知平台"
     count = conn.execute(
-        "SELECT COUNT(*) AS n FROM bot_configs WHERE platform = ?", (platform,)
+        "SELECT COUNT(*) AS n FROM bot_configs WHERE platform = ? AND owner_id = ?",
+        (platform, owner_id),
     ).fetchone()["n"]
     if count >= MAX_BOTS_PER_PLATFORM:
         return False, f"该平台最多 {MAX_BOTS_PER_PLATFORM} 个机器人"
@@ -406,6 +432,7 @@ def delete_user(conn, user_id: int) -> tuple[bool, str]:
         if others == 0:
             return False, "至少保留一个管理员"
     conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
+    conn.execute("DELETE FROM user_ai_settings WHERE user_id = ?", (user_id,))
     conn.execute("UPDATE bot_configs SET owner_id = 0 WHERE owner_id = ?", (user_id,))
     conn.commit()
     return True, "已删除"
@@ -540,6 +567,133 @@ def put_ai_settings(conn, updates: dict[str, Any]) -> list[str]:
         settings_store.set_setting(conn, "ai_cloud_api_key", encrypt_json({"key": str(updates["api_key"])}))
         applied.append("ai_cloud_api_key")
     return applied
+
+
+def get_user_ai_settings(conn, user_id: int, admin: bool) -> dict:
+    """当前登录账号的 AI 配置视图；管理员即全局配置。"""
+    if admin:
+        return get_ai_settings(conn)
+    row = conn.execute(
+        "SELECT * FROM user_ai_settings WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    return {
+        "local_enabled": bool(row and row["local_enabled"]),
+        "local_model": settings_store.get_setting(conn, "ai_local_model", "qwen2.5:0.5b") or "qwen2.5:0.5b",
+        "local_base_url": (settings_store.get_setting(conn, "ai_local_base_url", "http://localhost:11434") or "http://localhost:11434").strip(),
+        "cloud_enabled": bool(row and row["cloud_enabled"]),
+        "cloud_model": (row["cloud_model"] if row else "") or "",
+        "cloud_base_url": (row["cloud_base_url"] if row else "") or "",
+        "has_api_key": bool(row and row["api_key_enc"]),
+        "order": (row["ai_order"] if row else "") or "rules,local,cloud",
+        "timeout_seconds": settings_store.get_setting(conn, "ai_timeout_seconds", "45") or "45",
+    }
+
+
+def put_user_ai_settings(conn, user_id: int, admin: bool, updates: dict[str, Any]) -> list[str]:
+    """保存当前登录账号的 AI 配置；管理员直接写全局。"""
+    if admin:
+        return put_ai_settings(conn, updates)
+    row = conn.execute(
+        "SELECT * FROM user_ai_settings WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO user_ai_settings (user_id) VALUES (?)", (user_id,)
+        )
+        row = conn.execute(
+            "SELECT * FROM user_ai_settings WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    applied: list[str] = []
+    local_enabled = 1 if row["local_enabled"] else 0
+    if isinstance(updates.get("local_enabled"), bool):
+        local_enabled = 1 if updates["local_enabled"] else 0
+        applied.append("user_ai_local_enabled")
+    cloud_enabled = 1 if row["cloud_enabled"] else 0
+    if isinstance(updates.get("cloud_enabled"), bool):
+        cloud_enabled = 1 if updates["cloud_enabled"] else 0
+        applied.append("user_ai_cloud_enabled")
+    cloud_model = (row["cloud_model"] or "").strip()
+    if updates.get("cloud_model") is not None:
+        cloud_model = str(updates["cloud_model"]).strip()
+        applied.append("user_ai_cloud_model")
+    cloud_base_url = (row["cloud_base_url"] or "").strip()
+    if updates.get("cloud_base_url") is not None:
+        cloud_base_url = str(updates["cloud_base_url"]).strip()
+        applied.append("user_ai_cloud_base_url")
+    api_key_enc = row["api_key_enc"] or ""
+    new_key = updates.get("api_key")
+    if new_key not in (None, "", "••••••••"):
+        api_key_enc = encrypt_json({"key": str(new_key)})
+        applied.append("user_ai_cloud_api_key")
+    ai_order = (row["ai_order"] or "").strip() or "rules,local,cloud"
+    if updates.get("order") is not None:
+        order = ",".join(p.strip() for p in str(updates["order"]).split(",") if p.strip())
+        if order in VALID_AI_ORDERS:
+            ai_order = order
+            applied.append("user_ai_order")
+    conn.execute(
+        """
+        UPDATE user_ai_settings
+        SET local_enabled = ?, cloud_enabled = ?, cloud_model = ?, cloud_base_url = ?,
+            api_key_enc = ?, ai_order = ?, updated_at = datetime('now')
+        WHERE user_id = ?
+        """,
+        (local_enabled, cloud_enabled, cloud_model, cloud_base_url, api_key_enc, ai_order, user_id),
+    )
+    conn.commit()
+    return applied
+
+
+def effective_ai_settings(conn, namespace: str) -> dict:
+    """按消息所属机器人的归属账号解析实际 AI 配置。
+
+    管理员（或无对应机器人的遗留命名空间）用全局配置；普通用户用自己的
+    配置行（默认全关），本地模型名/地址与超时仍取全局。
+    """
+    global_local_model = settings_store.get_setting(conn, "ai_local_model", "qwen2.5:0.5b") or "qwen2.5:0.5b"
+    global_local_base_url = (
+        settings_store.get_setting(conn, "ai_local_base_url", "http://localhost:11434") or "http://localhost:11434"
+    ).strip()
+    global_timeout = settings_store.get_setting(conn, "ai_timeout_seconds", "45") or "45"
+    global_order = settings_store.get_setting(conn, "ai_order", "rules,local,cloud") or "rules,local,cloud"
+
+    def global_cfg() -> dict:
+        return {
+            "local_enabled": settings_store.get_setting(conn, "ai_local_enabled", "0") == "1",
+            "local_model": global_local_model,
+            "local_base_url": global_local_base_url,
+            "cloud_enabled": settings_store.get_setting(conn, "ai_cloud_enabled", "0") == "1",
+            "cloud_model": settings_store.get_setting(conn, "ai_cloud_model", "") or "",
+            "cloud_base_url": (settings_store.get_setting(conn, "ai_cloud_base_url", "") or "").strip(),
+            "api_key_enc": settings_store.get_setting(conn, "ai_cloud_api_key", "") or "",
+            "order": global_order,
+            "timeout_seconds": global_timeout,
+        }
+
+    bot = conn.execute(
+        "SELECT owner_id FROM bot_configs WHERE bot_id = ?", (namespace,)
+    ).fetchone()
+    if bot is None:
+        return global_cfg()
+    owner = conn.execute(
+        "SELECT role FROM admin_users WHERE id = ?", (bot["owner_id"],)
+    ).fetchone()
+    if owner is not None and owner["role"] == "admin":
+        return global_cfg()
+    row = conn.execute(
+        "SELECT * FROM user_ai_settings WHERE user_id = ?", (bot["owner_id"],)
+    ).fetchone()
+    return {
+        "local_enabled": bool(row and row["local_enabled"]),
+        "local_model": global_local_model,
+        "local_base_url": global_local_base_url,
+        "cloud_enabled": bool(row and row["cloud_enabled"]),
+        "cloud_model": (row["cloud_model"] if row else "") or "",
+        "cloud_base_url": (row["cloud_base_url"] if row else "") or "",
+        "api_key_enc": (row["api_key_enc"] if row else "") or "",
+        "order": (row["ai_order"] if row else "") or "rules,local,cloud",
+        "timeout_seconds": global_timeout,
+    }
 
 
 def bot_users(conn, namespace: str) -> list[str]:

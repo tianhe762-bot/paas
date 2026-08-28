@@ -278,7 +278,7 @@ async def test_ai_disabled_and_enabled(client, monkeypatch):
 
     seen = []
 
-    async def fake_ai(conn, content, backend):
+    async def fake_ai(conn, content, backend, cfg=None):
         seen.append((content, backend))
         calls.append(content)
         return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 25, "account": "微信", "note": "吃饭"}
@@ -291,7 +291,7 @@ async def test_ai_disabled_and_enabled(client, monkeypatch):
     assert calls == ["今天微信吃饭花了25"]
     assert seen == [("今天微信吃饭花了25", "cloud")]  # 手动触发：跳过规则，云端（顺序中先于本地）
 
-    async def fake_ai2(conn, content, backend):
+    async def fake_ai2(conn, content, backend, cfg=None):
         calls.append(content)
         return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 35, "account": "", "note": "打车"}
 
@@ -343,11 +343,16 @@ async def test_ai_pull_uses_local_base_url(client, monkeypatch):
 async def test_conversations_api(client):
     headers = {"X-Api-Key": "test-api-key"}
     await client.post(
-        "/api/v1/message/inbound", headers=headers,
-        json={"platform": "qq", "user_id": "u_conv", "chat_id": "c", "message_id": "cv1", "content": "今天微信吃饭花了25元"},
-    )
-    await client.post(
         "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "会话机器人", "enabled": False, "fields": {"app_id": "1"}},
+    )).json()["bot_id"]
+    await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={"namespace": bot, "platform": "qq", "user_id": "u_conv", "chat_id": "c",
+              "message_id": "cv1", "content": "今天微信吃饭花了25元"},
     )
     r = await client.get("/admin/api/conversations?limit=10")
     assert r.status_code == 200
@@ -548,3 +553,529 @@ async def test_admin_change_password(client):
         "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
     )
     assert r2.status_code == 401
+
+
+async def test_per_user_bot_limit(client):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "bob", "password": "bob-pass-123", "role": "user"}
+    )
+    # 用户 A 每平台最多 5 个
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    for i in range(5):
+        r = await client.post(
+            "/admin/api/bots",
+            json={"platform": "qq", "name": f"alice-bot-{i}", "enabled": False, "fields": {"app_id": str(i)}},
+        )
+        assert r.status_code == 200, r.text
+    sixth = await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "alice-bot-6", "enabled": False, "fields": {"app_id": "6"}},
+    )
+    assert sixth.status_code == 400
+    # 用户 B 不受用户 A 数量影响，仍可创建 QQ 机器人
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "bob", "password": "bob-pass-123"}
+    )
+    r = await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "bob-bot", "enabled": False, "fields": {"app_id": "bob"}},
+    )
+    assert r.status_code == 200
+    # 管理员创建自己的 QQ 机器人不受用户 A 数量影响
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    r = await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "admin-bot", "enabled": False, "fields": {"app_id": "admin"}},
+    )
+    assert r.status_code == 200
+
+
+async def test_bot_list_isolation(client):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    admin_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "telegram", "name": "admin的TG", "enabled": False, "fields": {"token": "1:AAA"}},
+    )).json()["bot_id"]
+    # 普通用户看不到管理员的机器人
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    alice_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "telegram", "name": "alice的TG", "enabled": False, "fields": {"token": "2:BBB"}},
+    )).json()["bot_id"]
+    bots = (await client.get("/admin/api/bots")).json()["bots"]
+    assert [b["bot_id"] for b in bots] == [alice_bot]
+    # 管理员看到全部机器人且带归属
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    all_bots = (await client.get("/admin/api/bots")).json()["bots"]
+    by_id = {b["bot_id"]: b for b in all_bots}
+    assert admin_bot in by_id and alice_bot in by_id
+    assert by_id[admin_bot]["owner_name"] == "admin"
+    assert by_id[alice_bot]["owner_name"] == "alice"
+
+
+async def test_user_data_scoping(client, conn):
+    headers = {"X-Api-Key": "test-api-key"}
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    admin_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "admin的QQ", "enabled": False, "fields": {"app_id": "1"}},
+    )).json()["bot_id"]
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    alice_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "alice的QQ", "enabled": False, "fields": {"app_id": "2"}},
+    )).json()["bot_id"]
+
+    # 流水：admin 的机器人 1 笔，alice 的机器人 2 笔
+    await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={"namespace": admin_bot, "platform": "qq", "user_id": "u_admin", "chat_id": "c",
+              "message_id": "adm1", "content": "今天微信吃饭花了25元"},
+    )
+    await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={"namespace": alice_bot, "platform": "qq", "user_id": "u_ali", "chat_id": "c",
+              "message_id": "ali1", "content": "今天微信吃饭花了25元"},
+    )
+    await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={"namespace": alice_bot, "platform": "qq", "user_id": "u_ali", "chat_id": "c",
+              "message_id": "ali2", "content": "今天支付宝打车花了30"},
+    )
+    # 导入记录：直接写入模拟
+    conn.execute(
+        "INSERT INTO imports (namespace, user_id, platform, message_id, filename, file_type, "
+        "total_rows, success_rows, failed_rows) VALUES (?,?,?,?,?,?,?,?,?)",
+        (admin_bot, "u_admin", "qq", "imp_a", "admin.csv", "csv", 3, 3, 0),
+    )
+    conn.execute(
+        "INSERT INTO imports (namespace, user_id, platform, message_id, filename, file_type, "
+        "total_rows, success_rows, failed_rows) VALUES (?,?,?,?,?,?,?,?,?)",
+        (alice_bot, "u_ali", "qq", "imp_b", "alice.csv", "csv", 5, 5, 0),
+    )
+    conn.commit()
+
+    # alice 视角：只有自己的机器人与数据
+    st = (await client.get("/admin/api/status")).json()
+    assert st["bots"] == 1
+    assert st["expenses"] == 2
+    assert st["imports"] == 1
+    im = (await client.get("/admin/api/imports")).json()["imports"]
+    assert [r["filename"] for r in im] == ["alice.csv"]
+    cv = (await client.get("/admin/api/conversations?limit=50")).json()["conversations"]
+    msgs = {c["message_id"] for c in cv}
+    assert {"ali1", "ali2"} <= msgs
+    assert "adm1" not in msgs
+
+    # admin 视角：全部状态与记录，但最近对话只有自己的
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    st = (await client.get("/admin/api/status")).json()
+    assert st["bots"] == 2
+    assert st["expenses"] == 3
+    assert st["imports"] == 2
+    im = (await client.get("/admin/api/imports")).json()["imports"]
+    assert len(im) == 2
+    cv = (await client.get("/admin/api/conversations?limit=50")).json()["conversations"]
+    msgs = {c["message_id"] for c in cv}
+    assert "adm1" in msgs
+    assert "ali1" not in msgs and "ali2" not in msgs
+
+
+async def test_ownership_checks(client):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    admin_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "admin的QQ", "enabled": False, "fields": {"app_id": "1"}},
+    )).json()["bot_id"]
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    alice_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "alice的QQ", "enabled": False, "fields": {"app_id": "2"}},
+    )).json()["bot_id"]
+
+    # alice 访问管理员的机器人 → 一律 403
+    assert (await client.get(f"/admin/api/bots/{admin_bot}/accounts")).status_code == 403
+    assert (await client.put(
+        f"/admin/api/bots/{admin_bot}/accounts", json={"templates": []}
+    )).status_code == 403
+    assert (await client.post(
+        f"/admin/api/bots/{admin_bot}/test", json={"fields": {"app_id": "1"}}
+    )).status_code == 403
+    assert (await client.get(
+        f"/admin/api/backfill/preview?namespace={admin_bot}&user_id=u&keyword=k"
+    )).status_code == 403
+    assert (await client.post(
+        "/admin/api/backfill/apply",
+        json={"namespace": admin_bot, "user_id": "u", "mappings": [{"keyword": "k", "account": "a"}]},
+    )).status_code == 403
+    assert (await client.get(f"/admin/api/export?namespace={admin_bot}&user_id=u")).status_code == 403
+
+    # alice 自己的机器人 → 正常
+    assert (await client.get(f"/admin/api/bots/{alice_bot}/accounts")).status_code == 200
+    assert (await client.get(
+        f"/admin/api/backfill/preview?namespace={alice_bot}&user_id=u&keyword=k"
+    )).status_code == 200
+
+
+async def test_settings_admin_only(client):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    # 普通用户：设置与 AI 全部 403
+    assert (await client.get("/admin/api/settings")).status_code == 403
+    assert (await client.put(
+        "/admin/api/settings", json={"updates": {"dedup_window_seconds": "45"}}
+    )).status_code == 403
+    assert (await client.get("/admin/api/ai")).status_code == 403
+    assert (await client.put("/admin/api/ai", json={})).status_code == 403
+    assert (await client.post("/admin/api/ai/status")).status_code == 403
+    assert (await client.post("/admin/api/ai/pull", json={})).status_code == 403
+    assert (await client.post(
+        "/admin/api/ai/local/delete", json={"model": "qwen2.5:0.5b", "confirm": "删除本地模型"}
+    )).status_code == 403
+    # 管理员正常
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    assert (await client.get("/admin/api/settings")).status_code == 200
+    assert (await client.get("/admin/api/ai")).status_code == 200
+
+
+async def test_ai_me_default_off(client):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    a = (await client.get("/admin/api/ai/me")).json()
+    assert a["local_enabled"] is False
+    assert a["cloud_enabled"] is False
+    assert a["has_api_key"] is False
+    assert a["order"] == "rules,local,cloud"
+    assert a["local_model"] == "qwen2.5:0.5b"
+
+
+async def test_ai_me_user_isolation_and_ignored_fields(client):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "bob", "password": "bob-pass-123", "role": "user"}
+    )
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    put = await client.put("/admin/api/ai/me", json={
+        "local_enabled": True,
+        "local_model": "evil-model",
+        "local_base_url": "http://evil:11434",
+        "cloud_enabled": True,
+        "cloud_model": "deepseek-chat",
+        "cloud_base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-alice",
+        "order": "cloud,rules,local",
+        "timeout_seconds": "999",
+    })
+    assert put.status_code == 200
+    a = (await client.get("/admin/api/ai/me")).json()
+    assert a["local_enabled"] is True
+    assert a["cloud_enabled"] is True
+    assert a["has_api_key"] is True
+    assert a["cloud_model"] == "deepseek-chat"
+    assert a["order"] == "cloud,rules,local"
+    # 本地模型名/地址与超时由服务器统一配置，普通用户提交被忽略
+    assert a["local_model"] == "qwen2.5:0.5b"
+    assert a["timeout_seconds"] == "45"
+    # bob 看不到 alice 的配置
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "bob", "password": "bob-pass-123"}
+    )
+    b = (await client.get("/admin/api/ai/me")).json()
+    assert b["local_enabled"] is False
+    assert b["has_api_key"] is False
+    assert b["cloud_model"] == ""
+    assert b["order"] == "rules,local,cloud"
+    # 管理员全局配置不受 alice 影响
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    g = (await client.get("/admin/api/ai")).json()
+    assert g["local_enabled"] is False
+    assert g["has_api_key"] is False
+    # 普通用户无权访问全局 AI 接口
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    assert (await client.get("/admin/api/ai")).status_code == 403
+    assert (await client.put("/admin/api/ai", json={})).status_code == 403
+    # API Key 掩码/留空保留原值
+    r = await client.put("/admin/api/ai/me", json={
+        "local_enabled": True,
+        "cloud_enabled": True,
+        "cloud_model": "deepseek-chat",
+        "cloud_base_url": "https://api.deepseek.com/v1",
+        "api_key": "••••••••",
+        "order": "cloud,rules,local",
+    })
+    assert r.status_code == 200
+    a2 = (await client.get("/admin/api/ai/me")).json()
+    assert a2["has_api_key"] is True
+
+
+async def test_delete_user_cleans_ai_settings(client, conn):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    alice_id = conn.execute(
+        "SELECT id FROM admin_users WHERE username = 'alice'"
+    ).fetchone()["id"]
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    await client.put("/admin/api/ai/me", json={
+        "local_enabled": True,
+        "cloud_enabled": True,
+        "cloud_model": "m",
+        "cloud_base_url": "https://x",
+        "api_key": "sk-alice",
+        "order": "rules,cloud,local",
+    })
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM user_ai_settings WHERE user_id = ?", (alice_id,)
+    ).fetchone()["n"] == 1
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    d = await client.delete(f"/admin/api/users/{alice_id}")
+    assert d.status_code == 200
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM user_ai_settings WHERE user_id = ?", (alice_id,)
+    ).fetchone()["n"] == 0
+
+
+async def test_effective_ai_settings_scoped(client, conn):
+    from paas.modules.admin import service as admin_service
+    from paas.security import decrypt_json
+
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "bob", "password": "bob-pass-123", "role": "user"}
+    )
+    admin_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "admin的QQ", "enabled": False, "fields": {"app_id": "1"}},
+    )).json()["bot_id"]
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    alice_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "alice的QQ", "enabled": False, "fields": {"app_id": "2"}},
+    )).json()["bot_id"]
+    await client.put("/admin/api/ai/me", json={
+        "local_enabled": True,
+        "cloud_enabled": True,
+        "cloud_model": "deepseek-chat",
+        "cloud_base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-alice",
+        "order": "cloud,rules,local",
+    })
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "bob", "password": "bob-pass-123"}
+    )
+    bob_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "bob的QQ", "enabled": False, "fields": {"app_id": "3"}},
+    )).json()["bot_id"]
+
+    # alice 的机器人：用自己的 key 与顺序
+    cfg = admin_service.effective_ai_settings(conn, alice_bot)
+    assert cfg["local_enabled"] is True
+    assert cfg["cloud_enabled"] is True
+    assert decrypt_json(cfg["api_key_enc"])["key"] == "sk-alice"
+    assert cfg["order"] == "cloud,rules,local"
+    assert cfg["local_model"] == "qwen2.5:0.5b"
+    # 管理员的机器人：全局配置（默认无云端 key）
+    cfg_admin = admin_service.effective_ai_settings(conn, admin_bot)
+    assert cfg_admin["cloud_enabled"] is False
+    assert cfg_admin["api_key_enc"] == ""
+    # 未配置的普通用户：默认全关
+    cfg_bob = admin_service.effective_ai_settings(conn, bob_bot)
+    assert cfg_bob["local_enabled"] is False
+    assert cfg_bob["cloud_enabled"] is False
+    assert cfg_bob["api_key_enc"] == ""
+    assert cfg_bob["order"] == "rules,local,cloud"
+    # 未知命名空间：回退全局
+    cfg_default = admin_service.effective_ai_settings(conn, "default")
+    assert cfg_default["local_model"] == "qwen2.5:0.5b"
+
+
+async def test_router_uses_owner_ai_settings(client, monkeypatch):
+    from paas.security import decrypt_json
+
+    headers = {"X-Api-Key": "test-api-key"}
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "bob", "password": "bob-pass-123", "role": "user"}
+    )
+    admin_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "admin的QQ", "enabled": False, "fields": {"app_id": "1"}},
+    )).json()["bot_id"]
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    alice_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "alice的QQ", "enabled": False, "fields": {"app_id": "2"}},
+    )).json()["bot_id"]
+    await client.put("/admin/api/ai/me", json={
+        "local_enabled": False,
+        "cloud_enabled": True,
+        "cloud_model": "deepseek-chat",
+        "cloud_base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-alice",
+        "order": "cloud,rules,local",
+    })
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "bob", "password": "bob-pass-123"}
+    )
+    bob_bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "qq", "name": "bob的QQ", "enabled": False, "fields": {"app_id": "3"}},
+    )).json()["bot_id"]
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.put("/admin/api/ai", json={
+        "local_enabled": False,
+        "local_model": "qwen2.5:0.5b",
+        "local_base_url": "http://localhost:11434",
+        "cloud_enabled": True,
+        "cloud_model": "admin-chat",
+        "cloud_base_url": "https://api.admin.example/v1",
+        "api_key": "sk-admin",
+        "order": "rules,cloud,local",
+        "timeout_seconds": "45",
+    })
+
+    captured = []
+
+    async def fake_ai(conn, content, backend, cfg=None):
+        captured.append((backend, cfg))
+        return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 25, "account": "微信", "note": "吃饭"}
+
+    monkeypatch.setattr("paas.interpreter.core.ai_interpret", fake_ai)
+
+    # alice 的机器人：使用 alice 自己的 key
+    r = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={"namespace": alice_bot, "platform": "qq", "user_id": "u_a", "chat_id": "c",
+              "message_id": "ai_a1", "content": "用AI：今天微信吃饭花了25"},
+    )
+    assert r.json()["status"] == "success"
+    backend, cfg = captured[-1]
+    assert backend == "cloud"
+    assert decrypt_json(cfg["api_key_enc"])["key"] == "sk-alice"
+    # 管理员的机器人：使用全局（管理员本人）的 key
+    captured.clear()
+    r2 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={"namespace": admin_bot, "platform": "qq", "user_id": "u_adm", "chat_id": "c",
+              "message_id": "ai_adm1", "content": "用AI：今天微信吃饭花了25"},
+    )
+    assert r2.json()["status"] == "success"
+    backend2, cfg2 = captured[-1]
+    assert decrypt_json(cfg2["api_key_enc"])["key"] == "sk-admin"
+    # 未配置的普通用户：AI 未启用，不调用任何 AI 后端
+    captured.clear()
+    r3 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={"namespace": bob_bot, "platform": "qq", "user_id": "u_b", "chat_id": "c",
+              "message_id": "ai_b1", "content": "用AI：今天微信吃饭花了25"},
+    )
+    assert "未启用" in r3.json()["reply_content"]
+    assert captured == []

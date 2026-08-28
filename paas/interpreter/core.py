@@ -17,7 +17,9 @@ SYSTEM_PROMPT = (
     "你是个人记账助手。把用户的中文记账消息解析为 JSON，只输出 JSON，不要任何其他文字。"
     "JSON 字段：{\"date\":\"YYYY-MM-DD 或 今天/昨天/前天/8月20日\","
     "\"type\":\"expense|income|transfer|refund|fee|adjust\","
-    "\"category\":\"餐饮|交通|购物|娱乐|生活|医疗|其他\","
+    "\"category\":\"餐饮(吃饭/外卖/火锅/奶茶)|交通(打车/地铁/加油/机票)|"
+    "购物(买衣服/数码/淘宝/京东/超市)|娱乐(电影/游戏/旅游/健身)|"
+    "生活(水电/房租/话费/理发)|医疗(药/医院/体检)|其他\","
     "\"amount\":25.5,\"account\":\"微信\",\"to_account\":\"银行卡\","
     "\"note\":\"备注\"}。"
     "type 为 transfer 时 account 是转出账户、to_account 是转入账户。"
@@ -65,21 +67,36 @@ async def _chat_completion(url: str, headers: dict, payload: dict, timeout: floa
     return _extract_json(content)
 
 
-async def ai_interpret(conn, content: str, backend: str = "local") -> dict:
-    """调用单个 AI 后端（local=Ollama，cloud=OpenAI 兼容 API）。"""
+async def ai_interpret(
+    conn, content: str, backend: str = "local", cfg: dict | None = None
+) -> dict:
+    """调用单个 AI 后端（local=Ollama，cloud=OpenAI 兼容 API）。cfg 缺省时读全局设置。"""
+    if cfg is None:
+        cfg = {
+            "local_enabled": settings_store.get_setting(conn, "ai_local_enabled", "0") == "1",
+            "local_model": settings_store.get_setting(conn, "ai_local_model", "qwen2.5:0.5b") or "qwen2.5:0.5b",
+            "local_base_url": (
+                settings_store.get_setting(conn, "ai_local_base_url", "http://localhost:11434") or "http://localhost:11434"
+            ).strip(),
+            "cloud_enabled": settings_store.get_setting(conn, "ai_cloud_enabled", "0") == "1",
+            "cloud_model": settings_store.get_setting(conn, "ai_cloud_model", "") or "",
+            "cloud_base_url": (settings_store.get_setting(conn, "ai_cloud_base_url", "") or "").strip(),
+            "api_key_enc": settings_store.get_setting(conn, "ai_cloud_api_key", "") or "",
+            "timeout_seconds": settings_store.get_setting(conn, "ai_timeout_seconds", "45") or "45",
+        }
     if backend == "local":
-        if settings_store.get_setting(conn, "ai_local_enabled", "0") != "1":
+        if not cfg.get("local_enabled"):
             raise InterpreterDisabled("本地模型未启用")
-        model = settings_store.get_setting(conn, "ai_local_model", "qwen2.5:0.5b") or "qwen2.5:0.5b"
-        base_url = (settings_store.get_setting(conn, "ai_local_base_url", "http://localhost:11434") or "http://localhost:11434").strip()
+        model = cfg.get("local_model") or "qwen2.5:0.5b"
+        base_url = (cfg.get("local_base_url") or "http://localhost:11434").strip()
         url = base_url.rstrip("/") + "/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
     elif backend == "cloud":
-        if settings_store.get_setting(conn, "ai_cloud_enabled", "0") != "1":
+        if not cfg.get("cloud_enabled"):
             raise InterpreterDisabled("云端模型未启用")
-        model = settings_store.get_setting(conn, "ai_cloud_model", "") or ""
-        base_url = (settings_store.get_setting(conn, "ai_cloud_base_url", "") or "").strip()
-        key_enc = settings_store.get_setting(conn, "ai_cloud_api_key", "") or ""
+        model = (cfg.get("cloud_model") or "").strip()
+        base_url = (cfg.get("cloud_base_url") or "").strip()
+        key_enc = cfg.get("api_key_enc") or ""
         if not model or not base_url or not key_enc:
             raise InterpreterDisabled("云端模型未配置完整（base_url/model/API Key）")
         from paas.security import decrypt_json
@@ -89,7 +106,7 @@ async def ai_interpret(conn, content: str, backend: str = "local") -> dict:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     else:
         raise ValueError(f"未知后端: {backend}")
-    timeout = float(settings_store.get_setting(conn, "ai_timeout_seconds", "45") or 45)
+    timeout = float(cfg.get("timeout_seconds") or 45)
     user_prompt = (
         f"记账消息：{content}\n"
         "请只输出 JSON。若信息不足（缺账户、缺时间、缺金额），对应字段给空字符串，不要编造。"
@@ -165,14 +182,25 @@ async def interpret(
     forced_ai: bool = False,
     categories=None,
     account_list=None,
+    ai_settings: dict | None = None,
 ):
     """按 ai_order 执行启用的引擎链，返回 (engine, items, last_error)。"""
-    order = normalize_order(settings_store.get_setting(conn, "ai_order", "rules,local,cloud"))
-    enabled = set()
-    if settings_store.get_setting(conn, "ai_local_enabled", "0") == "1":
-        enabled.add("local")
-    if settings_store.get_setting(conn, "ai_cloud_enabled", "0") == "1":
-        enabled.add("cloud")
+    if ai_settings is not None:
+        order = normalize_order(
+            ai_settings.get("order") or settings_store.get_setting(conn, "ai_order", "rules,local,cloud")
+        )
+        enabled = set()
+        if ai_settings.get("local_enabled"):
+            enabled.add("local")
+        if ai_settings.get("cloud_enabled"):
+            enabled.add("cloud")
+    else:
+        order = normalize_order(settings_store.get_setting(conn, "ai_order", "rules,local,cloud"))
+        enabled = set()
+        if settings_store.get_setting(conn, "ai_local_enabled", "0") == "1":
+            enabled.add("local")
+        if settings_store.get_setting(conn, "ai_cloud_enabled", "0") == "1":
+            enabled.add("cloud")
     if not forced_ai:
         enabled.add("rules")
     last_error = None
@@ -185,7 +213,7 @@ async def interpret(
                 if items:
                     return ("rules", items, None)
                 continue
-            result = await ai_interpret(conn, content, backend=name)
+            result = await ai_interpret(conn, content, backend=name, cfg=ai_settings)
             item = ai_result_to_item(result, categories or [], timeutil.today())
             return (name, [item], None)
         except InterpreterDisabled:

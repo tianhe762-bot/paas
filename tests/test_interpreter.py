@@ -39,7 +39,7 @@ async def test_chain_rules_first(tmp_path, monkeypatch):
     conn = _prepare_conn(tmp_path)
     called = []
 
-    async def fake_ai(conn_, content, backend):
+    async def fake_ai(conn_, content, backend, cfg=None):
         called.append(backend)
         return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 25, "account": "微信", "note": "吃饭"}
 
@@ -57,7 +57,7 @@ async def test_chain_local_then_cloud(tmp_path, monkeypatch):
     conn = _prepare_conn(tmp_path, order="local,cloud,rules")
     called = []
 
-    async def fake_ai(conn_, content, backend):
+    async def fake_ai(conn_, content, backend, cfg=None):
         called.append(backend)
         if backend == "local":
             raise RuntimeError("本地失败")
@@ -76,7 +76,7 @@ async def test_chain_all_fail(tmp_path, monkeypatch):
 
     conn = _prepare_conn(tmp_path, order="cloud,local,rules")
 
-    async def fake_ai(conn_, content, backend):
+    async def fake_ai(conn_, content, backend, cfg=None):
         raise RuntimeError("AI 挂了")
 
     monkeypatch.setattr("paas.interpreter.core.ai_interpret", fake_ai)
@@ -92,7 +92,7 @@ async def test_chain_forced_ai_skips_rules(tmp_path, monkeypatch):
     conn = _prepare_conn(tmp_path, order="rules,local,cloud")
     called = []
 
-    async def fake_ai(conn_, content, backend):
+    async def fake_ai(conn_, content, backend, cfg=None):
         called.append(backend)
         return {"date": "今天", "type": "expense", "category": "餐饮", "amount": 25, "account": "微信", "note": "吃饭"}
 

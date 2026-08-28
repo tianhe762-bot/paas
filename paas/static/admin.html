@@ -81,7 +81,7 @@
     <button class="active" data-tab="bots" onclick="showTab('bots')">机器人管理</button>
     <button data-tab="users" id="usersTab" onclick="showTab('users')">用户管理</button>
     <button data-tab="maintenance" id="maintenanceTab" onclick="showTab('maintenance')">更新卸载</button>
-    <button data-tab="settings" onclick="showTab('settings')">系统设置</button>
+    <button data-tab="settings" id="settingsTab" onclick="showTab('settings')">系统设置</button>
     <button data-tab="security" onclick="showTab('security')">安全</button>
     <button data-tab="status" onclick="showTab('status')">状态与备份</button>
   </div>
@@ -89,7 +89,7 @@
   <div id="tab-bots">
     <div class="card">
       <div class="flex">
-        <h2 style="margin:0">机器人列表（每平台最多 <span id="maxBots">5</span> 个）</h2>
+        <h2 style="margin:0">机器人列表（每用户每平台最多 <span id="maxBots">5</span> 个）</h2>
         <button class="btn-primary" onclick="openBotForm()">＋ 添加机器人</button>
       </div>
       <div id="botsList"></div>
@@ -192,7 +192,7 @@
   </div>
 
   <div id="tab-settings" class="hidden">
-    <div class="card">
+    <div class="card" id="globalSettingsCard">
       <h2>系统设置</h2>
       <div class="row">
         <div><label>时区</label><input id="sTimezone"></div>
@@ -208,7 +208,7 @@
       <textarea id="sReminderMessage"></textarea>
       <div style="margin-top:14px"><button class="btn-primary" onclick="saveSettings()">保存设置</button><span class="msg" id="msg-settings"></span></div>
     </div>
-    <div class="card">
+    <div class="card" id="aiAdminCard">
       <h2>AI 识别（可选）</h2>
       <p class="muted">聊天里发「用AI：今天微信吃饭花了25」可手动调用；识别顺序可自定义"哪个优先、哪个保底"。停用本地模型只停止调用，不会删除已下载的模型。</p>
       <div class="card" style="margin:0">
@@ -277,6 +277,49 @@
         <span class="msg" id="msg-ai"></span>
       </div>
       <div id="aiStatusResult" class="muted" style="margin-top:10px"></div>
+    </div>
+    <div class="card hidden" id="aiMeCard">
+      <h2>我的 AI 设置</h2>
+      <p class="muted">以下设置只作用于你自己名下的机器人，与其他用户互不影响；默认全部关闭。聊天里发「用AI：今天微信吃饭花了25」可手动调用。</p>
+      <div class="card" style="margin:0">
+        <div class="flex"><strong>规则引擎（字典/正则）</strong><span class="tag">始终启用</span></div>
+        <p class="muted">默认识别方式，零成本离线运行，可作为保底引擎。</p>
+      </div>
+      <div class="card" style="margin:0">
+        <div class="flex">
+          <strong>本地模型（Ollama）</strong>
+          <div class="switch"><input type="checkbox" id="aiMeLocalEnabled"><span>启用</span></div>
+        </div>
+        <p class="muted">模型与地址由管理员统一配置，你只可开启或关闭；开启后你的机器人会使用本地模型识别。</p>
+      </div>
+      <div class="card" style="margin:0" id="aiMeCloudCard">
+        <div class="flex">
+          <strong>云端模型（我的 API）</strong>
+          <div class="switch"><input type="checkbox" id="aiMeCloudEnabled"><span>启用</span></div>
+        </div>
+        <p class="muted">挂载你自己的 OpenAI 兼容 API（如 DeepSeek / 通义），密钥加密存储，只在你自己的机器人上使用。</p>
+        <div class="row">
+          <div><label>接口地址（base_url）</label><input id="aiMeCloudBaseUrl" placeholder="https://api.deepseek.com/v1"></div>
+          <div><label>模型名</label><input id="aiMeCloudModel" placeholder="deepseek-chat 等"></div>
+          <div><label>API Key（留空不改）</label><input id="aiMeApiKey" type="password"></div>
+        </div>
+      </div>
+      <div class="row">
+        <div><label>识别顺序（优先 → 保底）</label>
+          <select id="aiMeOrder">
+            <option value="rules,local,cloud">规则 → 本地 → 云端</option>
+            <option value="rules,cloud,local">规则 → 云端 → 本地</option>
+            <option value="local,rules,cloud">本地 → 规则 → 云端</option>
+            <option value="local,cloud,rules">本地 → 云端 → 规则</option>
+            <option value="cloud,rules,local">云端 → 规则 → 本地</option>
+            <option value="cloud,local,rules">云端 → 本地 → 规则</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <button class="btn-primary" onclick="saveAiMe()">保存我的 AI 设置</button>
+        <span class="msg" id="msg-ai-me"></span>
+      </div>
     </div>
   </div>
 
@@ -363,7 +406,13 @@ async function loadApp() {
   document.getElementById("roleTag").textContent = me.role === "admin" ? "管理员" : "普通用户";
   document.getElementById("usersTab").classList.toggle("hidden", me.role !== "admin");
   document.getElementById("maintenanceTab").classList.toggle("hidden", me.role !== "admin");
-  await Promise.all([loadBots(), loadSettings(), loadStatus()]);
+  document.getElementById("globalSettingsCard").classList.toggle("hidden", me.role !== "admin");
+  document.getElementById("aiAdminCard").classList.toggle("hidden", me.role !== "admin");
+  document.getElementById("aiMeCard").classList.toggle("hidden", me.role === "admin");
+  const tasks = [loadBots(), loadStatus()];
+  if (me.role === "admin") tasks.push(loadSettings());
+  else tasks.push(loadAiMe());
+  await Promise.all(tasks);
   if (me.role !== "admin") showTab("bots");
 }
 function showTab(name) {
@@ -373,6 +422,10 @@ function showTab(name) {
   if (name === "bots") loadBots();
   if (name === "users" && currentUser && currentUser.role === "admin") loadUsers();
   if (name === "maintenance" && currentUser && currentUser.role === "admin") loadMaintenance();
+  if (name === "settings") {
+    if (currentUser && currentUser.role === "admin") loadSettings();
+    else loadAiMe();
+  }
   if (name === "status") loadStatus();
 }
 
@@ -422,8 +475,10 @@ async function loadBots() {
       card.className = "card";
       const st = b.status === "running" ? '<span class="badge ok">运行中</span>' : b.status === "error" ? '<span class="badge err">错误</span>' : '<span class="badge off">停止</span>';
       const pname = b.platform === "qq" ? "QQ" : "Telegram";
+      const ownerTag = (currentUser && currentUser.role === "admin" && b.owner_name)
+        ? ' <span class="tag">归属：' + esc(b.owner_name) + '</span>' : "";
       card.innerHTML =
-        '<div class="bot-head"><div><strong>' + esc(b.name || b.bot_id) + '</strong> <span class="tag">' + pname + '</span> <span class="tag">' + esc(b.bot_id) + '</span> ' + st + '</div>' +
+        '<div class="bot-head"><div><strong>' + esc(b.name || b.bot_id) + '</strong> <span class="tag">' + pname + '</span> <span class="tag">' + esc(b.bot_id) + '</span>' + ownerTag + ' ' + st + '</div>' +
         '<div><button class="btn-ghost btn-sm" onclick="openBotEdit(\'' + b.bot_id + '\')">编辑</button> ' +
         '<button class="btn-ghost btn-sm" onclick="openAccounts(\'' + b.bot_id + '\')">账户</button></div></div>';
       if (b.last_error) card.innerHTML += '<p class="muted" style="color:var(--err)">' + esc(b.last_error) + '</p>';
@@ -611,8 +666,40 @@ function aiToggleGrey() {
   document.getElementById("aiLocalCard").style.opacity = localOn ? "1" : "0.55";
   document.getElementById("aiCloudCard").style.opacity = cloudOn ? "1" : "0.55";
 }
+function aiMeToggleGrey() {
+  const cloudOn = document.getElementById("aiMeCloudEnabled").checked;
+  document.getElementById("aiMeCloudCard").style.opacity = cloudOn ? "1" : "0.55";
+}
 document.getElementById("aiLocalEnabled").addEventListener("change", aiToggleGrey);
 document.getElementById("aiCloudEnabled").addEventListener("change", aiToggleGrey);
+document.getElementById("aiMeCloudEnabled").addEventListener("change", aiMeToggleGrey);
+async function loadAiMe() {
+  try {
+    const a = await api("/admin/api/ai/me");
+    document.getElementById("aiMeLocalEnabled").checked = !!a.local_enabled;
+    document.getElementById("aiMeCloudEnabled").checked = !!a.cloud_enabled;
+    document.getElementById("aiMeCloudModel").value = a.cloud_model || "";
+    document.getElementById("aiMeCloudBaseUrl").value = a.cloud_base_url || "";
+    document.getElementById("aiMeOrder").value = a.order || "rules,local,cloud";
+    document.getElementById("aiMeApiKey").value = "";
+    document.getElementById("aiMeApiKey").placeholder = a.has_api_key ? "已保存，留空不改" : "输入 API Key";
+    aiMeToggleGrey();
+  } catch (e) { /* 忽略 */ }
+}
+async function saveAiMe() {
+  try {
+    const r = await api("/admin/api/ai/me", {method: "PUT", body: JSON.stringify({
+      local_enabled: document.getElementById("aiMeLocalEnabled").checked,
+      cloud_enabled: document.getElementById("aiMeCloudEnabled").checked,
+      cloud_model: document.getElementById("aiMeCloudModel").value.trim(),
+      cloud_base_url: document.getElementById("aiMeCloudBaseUrl").value.trim(),
+      api_key: document.getElementById("aiMeApiKey").value,
+      order: document.getElementById("aiMeOrder").value,
+    })});
+    showMsg("msg-ai-me", "已保存：" + (r.applied.length ? r.applied.join(", ") : "无变更"), true);
+    await loadAiMe();
+  } catch (e) { showMsg("msg-ai-me", "保存失败：" + e.message, false); }
+}
 async function saveAi() {
   try {
     const r = await api("/admin/api/ai", {method: "PUT", body: JSON.stringify({

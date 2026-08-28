@@ -8,6 +8,7 @@ from paas import settings_store, timeutil
 from paas.db import connect
 from paas.models import Attachment, InboundMessage, ParsedItem, Reply
 from paas.modules.account import service as s
+from paas.modules.admin import service as admin_service
 from paas.modules.account.parser import (
     detect_accounts,
     has_time_expression,
@@ -403,8 +404,9 @@ class Router:
     async def _record(self, conn, msg: InboundMessage, content: str) -> Reply:
         categories = s.load_categories(conn)
         accts = s.account_keywords(conn, msg.namespace, msg.user_id)
+        ai_settings = admin_service.effective_ai_settings(conn, msg.namespace)
         _, items, _ = await interpret(
-            conn, content, categories=categories, account_list=accts
+            conn, content, categories=categories, account_list=accts, ai_settings=ai_settings
         )
         if not items:
             return Reply(
@@ -416,8 +418,10 @@ class Router:
     async def _handle_ai(self, conn, msg: InboundMessage, content: str) -> Reply:
         categories = s.load_categories(conn)
         accts = s.account_keywords(conn, msg.namespace, msg.user_id)
+        ai_settings = admin_service.effective_ai_settings(conn, msg.namespace)
         engine, items, error = await interpret(
-            conn, content, forced_ai=True, categories=categories, account_list=accts
+            conn, content, forced_ai=True, categories=categories, account_list=accts,
+            ai_settings=ai_settings,
         )
         if items:
             return self._draft_next(conn, msg, items, {"raw_text": content})
