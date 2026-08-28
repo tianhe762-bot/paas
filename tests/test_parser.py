@@ -153,3 +153,46 @@ def test_preset_bank_and_alias():
     assert detect_accounts("招商银行吃饭花了25") == ["招行卡"]
     assert detect_accounts("龙卡花了25", [("建行卡", ["建行", "龙卡"])]) == ["建行卡"]
     assert PRESET_BANKS
+
+
+def test_transfer_funded_expense(conn):
+    from paas.modules.account.parser import parse_transfer_funded_expense
+    from paas.modules.account.service import load_categories
+
+    items = parse_transfer_funded_expense(
+        "用微信转到银行卡里的钱买显卡花了3999",
+        load_categories(conn),
+        datetime.date(2026, 8, 29),
+    )
+    assert items is not None and len(items) == 2
+    transfer, expense = items
+    assert transfer.tx_type == "transfer_out"
+    assert (transfer.account_name, transfer.to_account_name) == ("微信", "银行卡")
+    assert transfer.amount_cents == 399900
+    assert expense.tx_type == "expense"
+    assert expense.account_name == "银行卡"
+    assert expense.amount_cents == 399900
+    assert expense.description == "买显卡"
+
+
+def test_transfer_funded_variants(conn):
+    from paas.modules.account.parser import parse_transfer_funded_expense
+    from paas.modules.account.service import load_categories
+
+    cats = load_categories(conn)
+    base = datetime.date(2026, 8, 29)
+    assert parse_transfer_funded_expense("从微信转到银行卡的钱买了手机5000", cats, base) is not None
+    assert parse_transfer_funded_expense("微信转到银行卡里面的钱吃饭花了20", cats, base) is not None
+    # 普通转账不能误判为“转账出资”
+    assert parse_transfer_funded_expense("微信转银行卡500元", cats, base) is None
+    assert parse_transfer_funded_expense("今天微信吃饭花了25", cats, base) is None
+
+
+def test_infer_unknown_account():
+    from paas.modules.account.parser import infer_unknown_account
+
+    known = {"微信", "支付宝", "银行卡", "现金", "信用卡", "工行卡"}
+    assert infer_unknown_account("北京银行卡花了25", known) == "北京银行卡"
+    assert infer_unknown_account("微众银行存了1000", known) == "微众银行"
+    assert infer_unknown_account("北京银行卡花了25", {"北京银行卡"}) is None
+    assert infer_unknown_account("微信吃饭花了25", known) is None

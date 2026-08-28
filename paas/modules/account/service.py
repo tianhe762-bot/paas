@@ -16,6 +16,7 @@ ZERO_PHRASES = {
 SKIP_PHRASES = {"跳过", "跳过今天", "不记了", "今天不记", "今天不记了"}
 CONFIRM_PHRASES = {"是", "确认", "是的", "对", "记录", "确定"}
 CANCEL_PHRASES = {"否", "取消", "不", "不用", "不记录", "取消记录"}
+NO_FEE_PHRASES = {"无", "没有", "无手续费", "没手续费", "没有手续费", "0", "零", "不用"}
 
 DEFAULT_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "信用卡"]
 
@@ -271,6 +272,43 @@ def account_keywords(conn, namespace: str, user_id: str) -> list[tuple[str, list
         if name not in names:
             out.append((name, kws))
     return out
+
+
+def user_account_names(conn, namespace: str, user_id: str) -> list[str]:
+    """该用户已有的账户名（按排序）。"""
+    rows = conn.execute(
+        "SELECT name FROM accounts WHERE namespace = ? AND user_id = ? ORDER BY sort_order, id",
+        (namespace, user_id),
+    ).fetchall()
+    return [r["name"] for r in rows]
+
+
+def account_list_for_display(conn, namespace: str, user_id: str) -> str:
+    """展示用账户清单：已有账户为空时显示默认账户。"""
+    names = user_account_names(conn, namespace, user_id) or DEFAULT_ACCOUNTS
+    return "、".join(names)
+
+
+def unknown_account_names(conn, namespace: str, user_id: str, items) -> list[str]:
+    """items 中出现但用户账户表里不存在的账户名（去重、保留出现顺序）。"""
+    existing = set(user_account_names(conn, namespace, user_id)) | set(DEFAULT_ACCOUNTS)
+    for row in conn.execute(
+        "SELECT name FROM account_templates WHERE namespace = ?", (namespace,)
+    ).fetchall():
+        existing.add(row["name"])
+    out: list[str] = []
+    for it in items:
+        for name in (getattr(it, "account_name", ""), getattr(it, "to_account_name", "")):
+            name = (name or "").strip()
+            if name and name not in existing and name not in out:
+                out.append(name)
+    return out
+
+
+def create_accounts(conn, namespace: str, user_id: str, names) -> None:
+    """把确认后的账户名写入账户表（已存在则跳过）。"""
+    for name in names:
+        get_or_create_account(conn, namespace, user_id, name)
 
 
 def get_or_create_account(conn, namespace: str, user_id: str, name: str) -> int | None:

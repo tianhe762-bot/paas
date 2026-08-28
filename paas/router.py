@@ -12,6 +12,7 @@ from paas.modules.admin import service as admin_service
 from paas.modules.account.parser import (
     detect_accounts,
     has_time_expression,
+    infer_unknown_account,
     parse_amount_cents,
     parse_amount_with_unit,
     parse_balance_command,
@@ -19,6 +20,7 @@ from paas.modules.account.parser import (
     parse_expenses,
     parse_modify_request,
     parse_time_range,
+    parse_transfer_funded_expense,
     yuan_to_cents,
 )
 from paas.modules.account.importer import parse_import
@@ -31,11 +33,13 @@ HELP_TEXT = (
     "📖 使用说明：\n"
     "· 记账：今天微信吃饭花了25（时间/账户/金额，缺啥问啥）\n"
     "· 类型：收入（工资5000）/ 转账（微信转银行卡500）/ 退款 / 手续费\n"
+    "· 转账出资：用微信转到银行卡里的钱买显卡3999（先记转账+支出，再问手续费）\n"
     "· 补记：昨天支付宝买显卡花了3999\n"
     "· 撤销：删除/撤销刚才那笔（软删除，保留历史）\n"
     "· 修改：刚才那笔不是25，是35\n"
     "· 平账：微信平账到90元（需确认）\n"
     "· 余额：微信还有多少钱 / 总资产\n"
+    "· 账户：我有什么账户 / 我有多少钱（列出账户和余额）\n"
     "· 统计：今天/昨天/本周/上周/本月/上月花了多少、这个月吃饭花了多少、详细一点\n"
     "· 设置初始余额：设置微信余额1000\n"
     "· 导入：发送 .csv/.xlsx 账本文件；导出：发送「导出」\n"
@@ -145,6 +149,12 @@ class Router:
                 "详细", "统计", "余额", "总资产", "还有多少钱", "多少钱",
                 "所有账户", "资产", "账单", "报表", "报告", "汇总", "生成",
             )
+        ):
+            return True
+        if (
+            re.search(r"(?:有什么|有哪些|哪些|什么|几个|多少)账户", content)
+            or content in {"账户", "我的账户", "账户列表"}
+            or "账户列表" in content
         ):
             return True
         if content in STATS_EXACT:
@@ -309,6 +319,59 @@ class Router:
                 ),
             )
 
+        if action == "NEW_ACCOUNT_CONFIRM":
+            payload = json.loads(pending["payload"])
+            if content in s.CONFIRM_PHRASES:
+                s.clear_pending(conn, msg.namespace, msg.user_id)
+                s.create_accounts(
+                    conn, msg.namespace, msg.user_id, payload.get("new_accounts") or []
+                )
+                items = s.confirm_payload_items(payload)
+                return self._draft_next(conn, msg, items, pending)
+            if content in s.CANCEL_PHRASES:
+                s.clear_pending(conn, msg.namespace, msg.user_id)
+                existing = s.account_list_for_display(conn, msg.namespace, msg.user_id)
+                return Reply(
+                    status="cancelled",
+                    reply_content=f"👌 已取消。可用已有账户重新记账：{existing}",
+                )
+            return Reply(
+                status="pending_confirmation",
+                reply_content="请回复【是】保存并记账，或【否】取消。",
+                requires_confirmation=True,
+            )
+
+        if action == "TRANSFER_FEE_ASK":
+            fee_cents = None
+            if content not in s.NO_FEE_PHRASES:
+                fee_cents = parse_amount_cents(content)
+                if fee_cents is None:
+                    return Reply(
+                        status="pending_confirmation",
+                        reply_content="请直接回复手续费金额（如 0.5），或回复【无】。",
+                        requires_confirmation=True,
+                    )
+            s.clear_pending(conn, msg.namespace, msg.user_id)
+            items = s.confirm_payload_items(json.loads(pending["payload"]))
+            if fee_cents:
+                tf = items[0]
+                cat = next(
+                    (c for c in s.load_categories(conn) if c.name == "其他"), None
+                )
+                items.append(
+                    ParsedItem(
+                        expense_date=tf.expense_date,
+                        category_id=cat.id if cat else 0,
+                        category_name=cat.name if cat else "其他",
+                        category_icon=cat.icon if cat else "📦",
+                        account_name=tf.account_name,
+                        tx_type="fee",
+                        amount_cents=fee_cents,
+                        description="手续费",
+                    )
+                )
+            return self._draft_next(conn, msg, items, pending)
+
         if action == "ASK_ACCOUNT":
             s.clear_pending(conn, msg.namespace, msg.user_id)
             items = s.confirm_payload_items(json.loads(pending["payload"]))
@@ -381,9 +444,32 @@ class Router:
                 conn, msg.namespace, msg.user_id, "ASK_ACCOUNT",
                 {"items": [it.model_dump(mode="json") for it in items], "raw_text": raw_text}, ttl,
             )
+            existing = s.account_list_for_display(conn, msg.namespace, msg.user_id)
             return Reply(
                 status="pending_confirmation",
-                reply_content="使用哪个账户？（微信/支付宝/银行卡/现金/信用卡）",
+                reply_content=f"使用哪个账户？（{existing}）",
+                requires_confirmation=True,
+            )
+        unknown = s.unknown_account_names(conn, msg.namespace, msg.user_id, items)
+        if unknown:
+            ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
+            s.set_pending(
+                conn, msg.namespace, msg.user_id, "NEW_ACCOUNT_CONFIRM",
+                {
+                    "items": [it.model_dump(mode="json") for it in items],
+                    "raw_text": raw_text,
+                    "new_accounts": unknown,
+                },
+                ttl,
+            )
+            existing = s.account_list_for_display(conn, msg.namespace, msg.user_id)
+            return Reply(
+                status="pending_confirmation",
+                reply_content=(
+                    "⚠️ 系统里还没有这些账户：" + "、".join(unknown) + "\n"
+                    "你当前已有账户：" + existing + "\n"
+                    "是否把它们保存为新账户并记账？回复【是】保存并记账，【否】取消。"
+                ),
                 requires_confirmation=True,
             )
         if not has_time_expression(raw_text):
@@ -404,6 +490,29 @@ class Router:
     async def _record(self, conn, msg: InboundMessage, content: str) -> Reply:
         categories = s.load_categories(conn)
         accts = s.account_keywords(conn, msg.namespace, msg.user_id)
+        # 「用的钱是微信转到银行卡里的钱」→ 转账 + 支出，并追问手续费
+        funded = parse_transfer_funded_expense(content, categories, timeutil.today(), accts)
+        if funded is not None:
+            tf, exp = funded[0], funded[1]
+            ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
+            s.set_pending(
+                conn, msg.namespace, msg.user_id, "TRANSFER_FEE_ASK",
+                {
+                    "items": [it.model_dump(mode="json") for it in funded],
+                    "raw_text": content,
+                },
+                ttl,
+            )
+            return Reply(
+                status="pending_confirmation",
+                reply_content=(
+                    f"🔁 识别到：{tf.account_name}转{tf.to_account_name} "
+                    f"{s.format_money(tf.amount_cents)} 元，随后 {exp.account_name} 支出 "
+                    f"{s.format_money(exp.amount_cents)} 元（{exp.description}）。\n"
+                    "这笔转账的手续费是多少？回复金额（如 0.5），或回复【无】"
+                ),
+                requires_confirmation=True,
+            )
         ai_settings = admin_service.effective_ai_settings(conn, msg.namespace)
         _, items, _ = await interpret(
             conn, content, categories=categories, account_list=accts, ai_settings=ai_settings
@@ -413,6 +522,22 @@ class Router:
                 status="unrecognized",
                 reply_content="未能识别消费内容。例如：「今天微信吃饭花了25」，或发送 .csv/.xlsx 账本导入。",
             )
+        # 文本里出现「XX银行(卡)」但没匹配到已知账户 → 作为新账户候选，后续询问是否保存
+        known = {n for n, _ in accts}
+        for it in items:
+            if it.tx_type != "transfer_out" and not it.account_name:
+                cand = infer_unknown_account(content, known)
+                if cand:
+                    it.account_name = cand
+            elif it.tx_type == "transfer_out":
+                if not it.account_name:
+                    cand = infer_unknown_account(content, known)
+                    if cand:
+                        it.account_name = cand
+                if not it.to_account_name:
+                    cand = infer_unknown_account(content, known)
+                    if cand:
+                        it.to_account_name = cand
         return self._draft_next(conn, msg, items, {"raw_text": content})
 
     async def _handle_ai(self, conn, msg: InboundMessage, content: str) -> Reply:
@@ -471,6 +596,28 @@ class Router:
                     ),
                     requires_confirmation=True,
                 )
+        unknown = s.unknown_account_names(conn, msg.namespace, msg.user_id, items)
+        if unknown:
+            ttl = settings_store.get_int(conn, "pending_ttl_seconds", 600)
+            s.set_pending(
+                conn, msg.namespace, msg.user_id, "NEW_ACCOUNT_CONFIRM",
+                {
+                    "items": [it.model_dump(mode="json") for it in items],
+                    "raw_text": raw_text,
+                    "new_accounts": unknown,
+                },
+                ttl,
+            )
+            existing = s.account_list_for_display(conn, msg.namespace, msg.user_id)
+            return Reply(
+                status="pending_confirmation",
+                reply_content=(
+                    "⚠️ 系统里还没有这些账户：" + "、".join(unknown) + "\n"
+                    "你当前已有账户：" + existing + "\n"
+                    "是否把它们保存为新账户并记账？回复【是】保存并记账，【否】取消。"
+                ),
+                requires_confirmation=True,
+            )
         return Reply(
             status="success",
             reply_content=s.summary_text(
@@ -613,6 +760,11 @@ class Router:
     async def _handle_query(self, conn, msg: InboundMessage, content: str) -> Reply:
         # 账户余额 / 总资产
         accounts_in_text = detect_accounts(content)
+        account_list_query = (
+            re.search(r"(?:有什么|有哪些|哪些|什么|几个|多少)账户", content)
+            or content in {"账户", "我的账户"}
+            or "账户列表" in content
+        )
         money_query = (
             "余额" in content
             or "总资产" in content
@@ -623,6 +775,8 @@ class Router:
                 and not any(w in content for w in ("花", "支出", "消费", "收入", "花费"))
             )
         )
+        if account_list_query:
+            return self._balance_reply(conn, msg.namespace, msg.user_id, None)
         if money_query:
             return self._balance_reply(
                 conn, msg.namespace, msg.user_id,

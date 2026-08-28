@@ -74,6 +74,19 @@ def test_transfer_and_fee_balance(conn):
     assert balances["银行卡"] == 50000
 
 
+def test_unknown_account_names_and_create(conn):
+    s.ensure_default_accounts(conn, "default", "u1")
+    items = [
+        make_item(2500, "吃饭", account="微信"),
+        make_item(50000, "转出", account="微信", tx_type="transfer_out"),
+    ]
+    items[1].to_account_name = "建行卡"
+    assert s.unknown_account_names(conn, "default", "u1", items) == ["建行卡"]
+    s.create_accounts(conn, "default", "u1", ["建行卡"])
+    assert "建行卡" in s.user_account_names(conn, "default", "u1")
+    assert s.unknown_account_names(conn, "default", "u1", items) == []
+
+
 def test_void_record_updates_balance(conn):
     saved, _ = s.record_items(conn, "default", "u1", [make_item(2500, "吃饭", account="微信")], "qq", "m-v1")
     record_id = conn.execute("SELECT id FROM expenses WHERE message_id='m-v1'").fetchone()["id"]

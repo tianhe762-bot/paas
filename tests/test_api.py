@@ -1102,3 +1102,104 @@ async def test_router_uses_owner_ai_settings(client, monkeypatch):
     )
     assert "未启用" in r3.json()["reply_content"]
     assert captured == []
+
+
+async def test_new_account_confirm_flow(client):
+    """记账出现系统里没有的账户 → 询问是否保存；【是】后保存并记账。"""
+    headers = {"X-Api-Key": "test-api-key"}
+    base = {"platform": "qq", "user_id": "u_nac", "chat_id": "c_nac"}
+
+    r1 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "n1", "content": "建行卡花了25"},
+    )
+    d1 = r1.json()
+    assert d1["status"] == "pending_confirmation"
+    assert "还没有这些账户" in d1["reply_content"]
+    assert "建行卡" in d1["reply_content"]
+    assert "你当前已有账户" in d1["reply_content"]
+
+    r2 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "n2", "content": "是"},
+    )
+    d2 = r2.json()
+    assert d2["status"] == "pending_confirmation"
+    assert "什么时候" in d2["reply_content"]  # 确认账户后再补时间
+
+    r3 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "n3", "content": "今天"},
+    )
+    d3 = r3.json()
+    assert d3["status"] == "success"
+    assert "已记录 1 笔" in d3["reply_content"]
+
+    r4 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "n4", "content": "建行卡还有多少钱"},
+    )
+    assert "建行卡 当前余额：-25.00 元" in r4.json()["reply_content"]
+
+
+async def test_transfer_funded_fee_flow(client):
+    """「用微信转到银行卡里的钱买显卡3999」→ 转账+支出，追问手续费后入账。"""
+    headers = {"X-Api-Key": "test-api-key"}
+    base = {"platform": "qq", "user_id": "u_tf", "chat_id": "c_tf"}
+
+    r1 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "t1", "content": "用微信转到银行卡里的钱买显卡花了3999"},
+    )
+    d1 = r1.json()
+    assert d1["status"] == "pending_confirmation"
+    assert "手续费" in d1["reply_content"]
+    assert "微信转银行卡" in d1["reply_content"]
+
+    r2 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "t2", "content": "0.5"},
+    )
+    d2 = r2.json()
+    assert d2["status"] == "pending_confirmation"
+    assert "什么时候" in d2["reply_content"]  # 时间还没补
+
+    r3 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "t3", "content": "今天"},
+    )
+    d3 = r3.json()
+    assert d3["status"] == "success"
+    assert "已记录 3 笔" in d3["reply_content"]
+
+    r4 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "t4", "content": "总资产"},
+    )
+    text = r4.json()["reply_content"]
+    assert "微信：-3999.50 元" in text
+    assert "银行卡：0.00 元" in text
+
+
+async def test_account_list_query(client):
+    """问「我有什么账户/我有多少钱」→ 列出账户和余额。"""
+    headers = {"X-Api-Key": "test-api-key"}
+    base = {"platform": "qq", "user_id": "u_alq", "chat_id": "c_alq"}
+    await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "a1", "content": "今天微信吃饭花了25"},
+    )
+    r = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "a2", "content": "我有什么账户"},
+    )
+    d = r.json()
+    assert d["status"] == "success"
+    assert "各账户余额" in d["reply_content"]
+    assert "微信：-25.00 元" in d["reply_content"]
+
+    r2 = await client.post(
+        "/api/v1/message/inbound", headers=headers,
+        json={**base, "message_id": "a3", "content": "我有多少钱"},
+    )
+    assert "总资产" in r2.json()["reply_content"]

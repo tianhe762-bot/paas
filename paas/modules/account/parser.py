@@ -45,6 +45,15 @@ TRANSFER_RE = re.compile(
 FEE_RE = re.compile(r"手续费|服务费")
 INCOME_RE = re.compile(r"收入|赚了|赚到|收到|入账|工资|报销|红包|进账|卖了")
 REFUND_RE = re.compile(r"退款|退钱|退回|退回来")
+UNKNOWN_BANK_RE = re.compile(r"([\u4e00-\u9fa5]{1,6}?银行(?:卡)?)")
+TF_FUND_RE = re.compile(
+    r"(?:用的钱|花的钱|用|花|支付)?(?:是)?(?:从)?"
+    r"(?P<from>[\u4e00-\u9fa5A-Za-z0-9]{1,12})"
+    r"转(?:账|给|至)?(?:到|入)?"
+    r"(?P<to>[\u4e00-\u9fa5A-Za-z0-9]{1,12})"
+    r"(?:里|里面|里的|里边的|那)?"
+    r"(?:的)?(?:钱|款|资金)"
+)
 
 TIME_WORD_RE = re.compile(
     r"今天|昨天|前天|大前天|今早|今晚|今午|"
@@ -340,6 +349,63 @@ def parse_expenses(
             )
         )
     return items
+
+
+def parse_transfer_funded_expense(
+    text: str,
+    categories: list[CategoryRow],
+    base_date: datetime.date,
+    account_list: Optional[list[tuple[str, list[str]]]] = None,
+) -> Optional[list[ParsedItem]]:
+    """识别「用的钱是微信转到银行卡里的钱，买了显卡3999」类说法。
+
+    拆成两笔：转账（微信→银行卡，金额=支出金额）+ 支出（银行卡，金额、描述）。
+    手续费不在本函数处理，由路由层追问用户后追加 fee 流水。
+    """
+    m = TF_FUND_RE.search(text)
+    if not m:
+        return None
+    from_accounts = detect_accounts(m.group("from"), account_list)
+    to_accounts = detect_accounts(m.group("to"), account_list)
+    if not from_accounts or not to_accounts:
+        return None
+    from_name, to_name = from_accounts[0], to_accounts[0]
+    if from_name == to_name:
+        return None
+    remainder = (text[: m.start()] + text[m.end():]).strip(" ，,、;；")
+    remainder = re.sub(r"^(?:然后|再|又|接着|并且|还)?[，,、]?", "", remainder).strip()
+    exp_items = parse_expenses(remainder, categories, base_date, account_list)
+    if not exp_items:
+        return None
+    expense = exp_items[0]
+    if expense.tx_type != "expense" or expense.amount_cents <= 0:
+        return None
+    amount = expense.amount_cents
+    day = parse_expense_date(text, base_date)
+    cat = match_category(f"{from_name}转{to_name}", categories)
+    transfer = ParsedItem(
+        expense_date=day,
+        category_id=cat.id,
+        category_name=cat.name,
+        category_icon=cat.icon,
+        account_name=from_name,
+        to_account_name=to_name,
+        tx_type="transfer_out",
+        amount_cents=amount,
+        description=f"{from_name}转{to_name}",
+    )
+    expense.account_name = to_name
+    expense.expense_date = day
+    return [transfer, expense]
+
+
+def infer_unknown_account(content: str, known: set[str]) -> Optional[str]:
+    """从文本找「XX银行(卡)」类账户候选（未出现在已知清单时返回第一个）。"""
+    for m in UNKNOWN_BANK_RE.finditer(content):
+        cand = m.group(1)
+        if cand not in known:
+            return cand
+    return None
 
 
 def parse_balance_command(text: str) -> dict:
