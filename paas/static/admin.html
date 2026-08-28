@@ -48,6 +48,7 @@
   .flex { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
   .bot-head { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
   .tag { font-size:12px; padding:2px 8px; border-radius:6px; background:var(--panel2); color:var(--muted); }
+  .owner-head { margin:22px 0 10px; font-size:15px; color:var(--accent); border-bottom:1px solid var(--line); padding-bottom:6px; }
 </style>
 </head>
 <body>
@@ -371,7 +372,6 @@ const CONFIG_FIELDS = {
     ["default_chat_id", "默认会话 ID（提醒目标，可留空）", "text"],
   ],
 };
-const SECRET_LABEL = { app_secret: "已保存，留空不修改", token: "已保存，留空不修改" };
 
 async function api(path, opts) {
   const resp = await fetch(path, Object.assign({headers: {"Content-Type": "application/json"}, credentials: "same-origin"}, opts));
@@ -470,19 +470,46 @@ async function loadBots() {
       list.innerHTML = '<p class="muted">还没有机器人，点右上角「添加机器人」创建一个。</p>';
       return;
     }
-    for (const b of data.bots) {
-      const card = document.createElement("div");
-      card.className = "card";
-      const st = b.status === "running" ? '<span class="badge ok">运行中</span>' : b.status === "error" ? '<span class="badge err">错误</span>' : '<span class="badge off">停止</span>';
-      const pname = b.platform === "qq" ? "QQ" : "Telegram";
-      const ownerTag = (currentUser && currentUser.role === "admin" && b.owner_name)
-        ? ' <span class="tag">归属：' + esc(b.owner_name) + '</span>' : "";
-      card.innerHTML =
-        '<div class="bot-head"><div><strong>' + esc(b.name || b.bot_id) + '</strong> <span class="tag">' + pname + '</span> <span class="tag">' + esc(b.bot_id) + '</span>' + ownerTag + ' ' + st + '</div>' +
-        '<div><button class="btn-ghost btn-sm" onclick="openBotEdit(\'' + b.bot_id + '\')">编辑</button> ' +
-        '<button class="btn-ghost btn-sm" onclick="openAccounts(\'' + b.bot_id + '\')">账户</button></div></div>';
-      if (b.last_error) card.innerHTML += '<p class="muted" style="color:var(--err)">' + esc(b.last_error) + '</p>';
-      list.appendChild(card);
+    const isAdmin = currentUser && currentUser.role === "admin";
+    // 管理员按归属分组：自己优先，其次其他用户，无主最后
+    let groups = [["", data.bots]];
+    if (isAdmin) {
+      const map = new Map();
+      for (const b of data.bots) {
+        const owner = b.owner_name || "无主";
+        if (!map.has(owner)) map.set(owner, []);
+        map.get(owner).push(b);
+      }
+      const keys = [...map.keys()].sort((a, b) => {
+        if (a === "无主") return 1;
+        if (b === "无主") return -1;
+        if (a === currentUser.username) return -1;
+        if (b === currentUser.username) return 1;
+        return 0;
+      });
+      groups = keys.map(k => [k, map.get(k)]);
+    }
+    for (const [owner, bots] of groups) {
+      if (isAdmin && owner) {
+        const head = document.createElement("div");
+        head.className = "owner-head";
+        head.textContent = owner + "（" + bots.length + "）";
+        list.appendChild(head);
+      }
+      for (const b of bots) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const st = b.status === "running" ? '<span class="badge ok">运行中</span>' : b.status === "error" ? '<span class="badge err">错误</span>' : '<span class="badge off">停止</span>';
+        const pname = b.platform === "qq" ? "QQ" : "Telegram";
+        const ownerTag = (isAdmin && b.owner_name)
+          ? ' <span class="tag">归属：' + esc(b.owner_name) + '</span>' : "";
+        card.innerHTML =
+          '<div class="bot-head"><div><strong>' + esc(b.name || b.bot_id) + '</strong> <span class="tag">' + pname + '</span> <span class="tag">' + esc(b.bot_id) + '</span>' + ownerTag + ' ' + st + '</div>' +
+          '<div><button class="btn-ghost btn-sm" onclick="openBotEdit(\'' + b.bot_id + '\')">编辑</button> ' +
+          '<button class="btn-ghost btn-sm" onclick="openAccounts(\'' + b.bot_id + '\')">账户</button></div></div>';
+        if (b.last_error) card.innerHTML += '<p class="muted" style="color:var(--err)">' + esc(b.last_error) + '</p>';
+        list.appendChild(card);
+      }
     }
   } catch (e) { showMsg("msg-bot", "加载失败：" + e.message, false); }
 }
@@ -508,10 +535,10 @@ function renderBotFields(platform, fields) {
       if (fields && fields[key]) input.value = fields[key];
     } else {
       input = document.createElement("input");
-      input.type = type;
+      input.type = "text";
       input.id = "bf_" + key;
-      input.placeholder = SECRET_LABEL[key] || "";
-      if (fields && fields["has_" + key]) input.placeholder = "已保存，留空表示不修改";
+      input.value = fields && fields[key] != null ? String(fields[key]) : "";
+      input.placeholder = (fields && fields["has_" + key]) ? "留空保持原值" : "";
     }
     wrap.appendChild(input);
     box.appendChild(wrap);
@@ -532,7 +559,7 @@ async function openBotEdit(botId) {
   try {
     const b = await api("/admin/api/bots/" + botId);
     editingBotId = botId;
-    document.getElementById("botFormTitle").textContent = "编辑机器人：" + (b.name || botId);
+    document.getElementById("botFormTitle").textContent = "编辑机器人：" + (b.name || botId) + "（" + botId + "）";
     document.getElementById("botForm").classList.remove("hidden");
     document.getElementById("botPlatform").value = b.platform;
     document.getElementById("botName").value = b.name || "";

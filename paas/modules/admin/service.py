@@ -255,7 +255,6 @@ def get_bot_fields(conn, bot_id: str) -> dict[str, Any]:
     ).fetchone()
     platform_name = platform["platform"] if platform else ""
     for field in SECRET_FIELDS.get(platform_name, set()):
-        merged[field] = ""
         merged[f"has_{field}"] = bool(stored.get(field))
     return merged
 

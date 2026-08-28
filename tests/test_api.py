@@ -413,6 +413,7 @@ async def test_admin_login_and_bots(client):
     assert got.status_code == 200
     cfg = got.json()["config"]
     assert cfg["app_id"] == "123456"
+    assert cfg["app_secret"] == "secret-abc"
     assert cfg["has_app_secret"] is True
 
     # 掩码值保存时保留原值
@@ -423,6 +424,28 @@ async def test_admin_login_and_bots(client):
     assert put2.status_code == 200
     got2 = await client.get("/admin/api/bots/" + bot_id)
     assert got2.json()["config"]["has_app_secret"] is True
+
+
+async def test_bot_secret_visible_to_owner(client):
+    await client.post(
+        "/admin/api/login", json={"username": "admin", "password": "test-admin-pass-123"}
+    )
+    await client.post(
+        "/admin/api/users", json={"username": "alice", "password": "alice-pass-123", "role": "user"}
+    )
+    await client.post("/admin/api/logout")
+    await client.post(
+        "/admin/api/login", json={"username": "alice", "password": "alice-pass-123"}
+    )
+    bot = (await client.post(
+        "/admin/api/bots",
+        json={"platform": "telegram", "name": "alice的TG", "enabled": False, "fields": {"token": "123:ABC"}},
+    )).json()["bot_id"]
+    got = await client.get("/admin/api/bots/" + bot)
+    assert got.status_code == 200
+    cfg = got.json()["config"]
+    assert cfg["token"] == "123:ABC"
+    assert cfg["has_token"] is True
 
 
 async def test_bot_limit_and_user_role(client):
